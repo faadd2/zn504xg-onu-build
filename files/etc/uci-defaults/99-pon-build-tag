@@ -1,0 +1,9 @@
+#!/bin/sh
+# 99-pon-build-tag —— 首次开机一次性设置：启用 pon-build-tag 开机同步服务。
+# 刷机后由新镜像的 uci-defaults 重新执行（pond-patch 同款模式）。
+if [ -x /etc/init.d/pon-build-tag ]; then
+    /etc/init.d/pon-build-tag enable 2>/dev/null || \
+        ln -sf ../init.d/pon-build-tag /etc/rc.d/S10pon-build-tag 2>/dev/null
+    /etc/init.d/pon-build-tag start 2>/dev/null
+fi
+exit 0
