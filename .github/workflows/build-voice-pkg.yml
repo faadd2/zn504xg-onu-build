@@ -128,22 +128,30 @@ jobs:
         run: |
           # 五轮（39043618565）实证：KERNEL_INITRAMFS 机制使内核镜像构建
           # 需要 rootfs 目录（gen_initramfs.sh: Cannot open root-airoha）；
-          # 六轮（39048766106）进一步实证：initramfs 镜像链还要 root.orig
-          # 快照 + per-device target-dir（opkg/apk 装设备包），单包 workflow
-          # 跳过 rootfs 段无法满足。本步只要 modules/Module.symvers，不
-          # 要任何固件镜像——airoha 的 image/Makefile Device/Default 与
-          # image/an7581.mk 每台设备都定义了 KERNEL_INITRAMFS
-          # （recovery.itb），全部清空（连同续行）即整链跳过
-          # （image.mk:637 $(if $$(KERNEL_INITRAMFS),...) 为空即不构建）。
+          # 六轮（39048766106）实证：initramfs 链还要 root.orig 快照；
+          # 七轮（39055058714）再实证：清空 KERNEL_INITRAMFS 后
+          # sysupgrade.itb 的 ROOTFS 依赖（image.mk:781）仍拉起
+          # per-device target-dir（image.mk:411），它要
+          # root.orig-$(BOARD) 快照——而该快照由顶层 package/install
+          # 链生成（package/Makefile:151），单包 workflow 永远不会有。
+          # 本步只要 modules/Module.symvers，不要任何固件镜像，双管齐下：
+          # ① 清空 KERNEL_INITRAMFS（含 image/Makefile 的 Device/Default）
+          #    与全部设备的 IMAGES → 不触发 target-dir/rootfs 镜像链；
+          # ② Manifest 步（image.mk:1034 install 目标无条件执行，
+          #    apk list --manifest 要读 root.orig 的 apk 数据库）——
+          #    手工建 root.orig-airoha 并 apk --initdb 空库兜住。
           sed -ri '/^[[:space:]]*KERNEL_INITRAMFS([[:space:]]*):?=[[:space:]]*kernel-bin/,+1d' \
               target/linux/airoha/image/Makefile target/linux/airoha/image/*.mk
-          grep -rn "KERNEL_INITRAMFS[[:space:]]*:?=[[:space:]]*kernel-bin" \
-              target/linux/airoha/image/ || echo "KERNEL_INITRAMFS 已全清空"
-          # 兜底：kernel usr 的 CONFIG_INITRAMFS_SOURCE 若指向 rootfs
-          # 目录，空目录也须存在。
+          sed -ri '/^[[:space:]]*IMAGES([[:space:]]*):=/d' \
+              target/linux/airoha/image/Makefile target/linux/airoha/image/*.mk
+          grep -rn "KERNEL_INITRAMFS[[:space:]]*:?=[[:space:]]*kernel-bin\|^[[:space:]]*IMAGES[[:space:]]*:=" \
+              target/linux/airoha/image/ || echo "KERNEL_INITRAMFS/IMAGES 已全清空"
           tdir=$(ls -d build_dir/target-*/ | head -1)
           echo "target dir: $tdir"
           mkdir -p "${tdir}root-airoha"
+          mkdir -p "${tdir}root.orig-airoha"
+          staging_dir/host/bin/apk --root "${tdir}root.orig-airoha" \
+              add --initdb --no-cache --repositories-file /dev/null || true
           make target/linux/install -j"$(nproc)" || {
             echo "::warning::parallel kernel build failed — retrying single-threaded V=s"
             make target/linux/install -j1 V=s
