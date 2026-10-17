@@ -82,17 +82,19 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a 2>/dev/null || true
 
-      - name: Configure (zn504 目标 + en75xx-voip)
+      # Configure 与 build.yml 全量构建同源（官方种子 + stock-frag 设备机制），
+      # 三轮实证（run 39038935708）：裸 8 行种子的 kernel 并行编译 34 分钟后
+      # 失败且错误被并行输出吞掉——不再用裸种子，只追加三个 kmod 选行。
+      - name: Configure (official an7581.config + stock-frag + voice)
         working-directory: ponwrt
         run: |
-          {
-            echo 'CONFIG_TARGET_airoha=y'
-            echo 'CONFIG_TARGET_airoha_an7581=y'
-            echo 'CONFIG_TARGET_airoha_an7581_DEVICE_znxt_zn504xg-d=y'
-            echo 'CONFIG_PACKAGE_kmod-en75xx-lec=y'
-            echo 'CONFIG_PACKAGE_kmod-en75xx-pcm=y'
-            echo 'CONFIG_PACKAGE_kmod-en75xx-slic-le9642=y'
-          } > .config
+          printf '%s\n' CONFIG_PACKAGE_kmod-en75xx-lec=y \
+            CONFIG_PACKAGE_kmod-en75xx-pcm=y CONFIG_PACKAGE_kmod-en75xx-slic-le9642=y \
+            > /tmp/voice-frag.config
+          ./scripts/kconfig.pl + \
+            configs/an7581.config \
+            ../onu-build/config/stock-frag.config \
+            /tmp/voice-frag.config > .config
           make defconfig
           echo "===== resolved packages ====="
           grep -E "^CONFIG_PACKAGE_kmod-en75xx" .config || { echo "::error:: en75xx-voip packages missing from .config"; exit 1; }
@@ -116,12 +118,16 @@ jobs:
 
       # KernelPackage 依赖内核树（vermagic），kernel 编译不可省。
       # 二轮实证（run 39035004018）：`make target/linux/compile` 在全新树上
-      # 静默空转（exit 0、零输出），包编译步随之 no-op 假成功——改走 install
-      # （prepare+compile+install 强制全做，与全量构建同路径），并硬校验内核树。
+      # 静默空转（exit 0、零输出）——改走 install（强制全做）。
+      # 三轮实证（run 39038935708）：并行 kernel 编译失败时错误被吞，
+      # 必须 -j1 V=s 重试兜底（与包编译步同策略）。
       - name: Build kernel
         working-directory: ponwrt
         run: |
-          make target/linux/install -j"$(nproc)"
+          make target/linux/install -j"$(nproc)" || {
+            echo "::warning::parallel kernel build failed — retrying single-threaded V=s"
+            make target/linux/install -j1 V=s
+          }
           kdir=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
           [ -n "$kdir" ] || kdir=$(ls -d build_dir/target-*/linux-* 2>/dev/null | head -1)
           echo "kernel dir: $kdir"
@@ -133,7 +139,7 @@ jobs:
         run: |
           make package/en75xx-voip/compile -j"$(nproc)" V=s || {
             echo "::warning::parallel build failed — retrying single-threaded V=s"
-            make package/en75xx-voip/compile -j1 V=sc
+            make package/en75xx-voip/compile -j1 V=s
           }
 
       - name: Verify artifacts
