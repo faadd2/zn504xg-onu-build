@@ -25,10 +25,9 @@ PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/Sirherobrine23/airoha_voip
 # Pinned, do not float: en7581 compat additions live in ./patches.
 PKG_SOURCE_VERSION:=4222576d980856f3c9ffc323d2fd78a28f94f085
-# TODO(B): 首次编译时 download 阶段会打印期望哈希，把它填到这里替换
-# 占位符（标准 OpenWrt 流程；占位期间可用 --force-check 或先跑一次
-# 失败的 download 步骤拿到数值）。
-PKG_MIRROR_HASH:=0000000000000000000000000000000000000000000000000000000000000000
+# Hash 实证来源：voice-pkg 快检 run 39034044216 download 步打印
+# （2026-10-17，zarq 官方流程；改 PKG_SOURCE_VERSION 必须重取）。
+PKG_MIRROR_HASH:=101b017ee9f909491825f9a2cd2799f69120c6d765767412bb6d78d8397faf5a
 
 include $(INCLUDE_DIR)/kernel.mk
 include $(INCLUDE_DIR)/package.mk
