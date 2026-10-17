@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+# pon-build-tag：每次开机把 /rom 中的固件版本标记同步到 /etc。
+# 背景：/etc 在 sysupgrade 时被整体保留，直接其中的标记会是旧固件的过期值；
+# /rom 是 squashfs 本体，永远代表当前运行固件。本脚本幂等，无副作用。
+START=10
+
+start() {
+    [ -f /rom/etc/pon-build-tag ] && cp -f /rom/etc/pon-build-tag /etc/pon-build-tag
+}
+
+stop() {
+    :
+}
