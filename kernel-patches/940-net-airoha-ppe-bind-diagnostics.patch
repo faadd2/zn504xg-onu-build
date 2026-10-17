@@ -1,0 +1,375 @@
+net: airoha: PPE bind failure diagnostics for AN7581 (201-06)
+
+Runtime-instrumented airoha_eth / airoha_ppe to locate the broken
+UNB -> BND promotion path on ZN504XG-D.  On the affected device the
+driver *accepts* netfilter flowtable rules ([HW_OFFLOAD] entries
+appear in conntrack), the hardware *learns* UNBIND entries
+(/sys/kernel/debug/ppe/entries grows), yet /sys/kernel/debug/ppe/bind
+stays at 0 forever, so all WAN traffic is CPU-forwarded.
+
+The promotion chain is: PPE hits an UNBIND entry above the rate
+threshold -> RX descriptor reports cpu_reason=0x0f
+(PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED) -> airoha_ppe_check_skb()
+(rate-limited per hash) -> airoha_ppe_foe_insert_entry() compares the
+learned entry against the software pending table -> commit to SRAM
+(BND).  This patch logs every gate in that chain, plus every reject
+gate in airoha_ppe_flow_offload_replace(), at pr_info_ratelimited
+with the "20106-ppe:" prefix.
+
+Logging is on by default and can be toggled at runtime:
+  echo 0 > /sys/module/airoha_eth/parameters/ppe_dbg_enabled
+
+Verification on device:
+  1. start a real TCP download (ICMP is never offloaded)
+  2. dmesg | grep 20106
+  3. wc -l /sys/kernel/debug/ppe/bind
+Expected when healthy: "replace accepted", periodic
+"check_skb: hash=...", "insert: committed sw->hw" and bind count > 0.
+
+Generated against vanilla v6.18.52 + full huladabang/ponwrt@c3b518b
+patch series.  Applies after 200-series ponwrt patches.  Diagnostic
+only - no functional change besides the module parameter.
+diff --git a/drivers/net/ethernet/airoha/airoha_eth.c b/drivers/net/ethernet/airoha/airoha_eth.c
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -23,6 +23,15 @@
+ #include "airoha_regs.h"
+ #include "airoha_eth.h"
+ 
++/* 201-06 PPE bind diagnostics (switch shared with airoha_ppe.c) */
++extern bool ppe_dbg_enabled;
++#define ppe_dbg(fmt, ...)						\
++	do {								\
++		if (ppe_dbg_enabled)					\
++			pr_info_ratelimited("20106-ppe: " fmt,		\
++					    ##__VA_ARGS__);		\
++	} while (0)
++
+ static const struct net_device_ops airoha_netdev_ops;
+ 
+ u32 airoha_rr(void __iomem *base, u32 offset)
+@@ -1083,6 +1092,8 @@
+ 		if (reason == PPE_CPU_REASON_HIT_UNBIND_RATE_REACHED)
+ 			airoha_ppe_check_skb(&eth->ppe->dev, q->skb, hash,
+ 					     false);
++		else if (reason)
++			ppe_dbg("eth: cpu_reason=%x hash=%x\n", reason, hash);
+ 
+ 		done++;
+ 		if (dev->flags & AIROHA_PRIV_F_PON) {
+diff --git a/drivers/net/ethernet/airoha/airoha_ppe.c b/drivers/net/ethernet/airoha/airoha_ppe.c
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -24,6 +24,18 @@
+ DEFINE_MUTEX(flow_offload_mutex);
+ static DEFINE_SPINLOCK(ppe_lock);
+ 
++/* 201-06 PPE bind diagnostics runtime switch */
++bool ppe_dbg_enabled = true;
++module_param(ppe_dbg_enabled, bool, 0644);
++MODULE_PARM_DESC(ppe_dbg_enabled, "201-06 PPE offload debug logging");
++
++#define ppe_dbg(fmt, ...)						\
++	do {								\
++		if (ppe_dbg_enabled)					\
++			pr_info_ratelimited("20106-ppe: " fmt,		\
++					    ##__VA_ARGS__);		\
++	} while (0)
++
+ static const struct rhashtable_params airoha_flow_table_params = {
+ 	.head_offset = offsetof(struct airoha_flow_table_entry, node),
+ 	.key_offset = offsetof(struct airoha_flow_table_entry, cookie),
+@@ -874,10 +886,17 @@
+ 		     FIELD_PREP(PPE_SRAM_CTRL_ENTRY_MASK, hash) |
+ 		     PPE_SRAM_CTRL_WR_MASK | PPE_SRAM_CTRL_REQ_MASK);
+ 
+-	return read_poll_timeout_atomic(airoha_fe_rr, val,
+-					val & PPE_SRAM_CTRL_ACK_MASK,
+-					10, 100, false, ppe->eth,
+-					REG_PPE_RAM_CTRL(ppe2));
++	{
++		int err;
++
++		err = read_poll_timeout_atomic(airoha_fe_rr, val,
++					       val & PPE_SRAM_CTRL_ACK_MASK,
++					       10, 100, false, ppe->eth,
++					       REG_PPE_RAM_CTRL(ppe2));
++		if (err)
++			ppe_dbg("commit_sram: poll timeout hash=%u\n", hash);
++		return err;
++	}
+ }
+ 
+ static int airoha_ppe_foe_commit_entry(struct airoha_ppe *ppe,
+@@ -1077,8 +1096,10 @@
+ 		goto unlock;
+ 
+ 	state = FIELD_GET(AIROHA_FOE_IB1_BIND_STATE, hwe->ib1);
+-	if (state == AIROHA_FOE_STATE_BIND)
++	if (state == AIROHA_FOE_STATE_BIND) {
++		ppe_dbg("insert: already BND hash=%x\n", hash);
+ 		goto unlock;
++	}
+ 
+ 	/* Native L2B uses its learned key, not an IPv4/L4 software hash bucket. */
+ 	if (airoha_is_7581(ppe->eth) &&
+@@ -1087,6 +1108,8 @@
+ 		goto l2_lookup;
+ 
+ 	index = airoha_ppe_foe_get_entry_hash(ppe, hwe);
++	ppe_dbg("insert: state=%u index=%u hash=%x rx_wlan=%d\n",
++		state, index, hash, rx_wlan);
+ 	hlist_for_each_entry_safe(e, n, &ppe->foe_flow[index], list) {
+ 		if (e->type == FLOW_TYPE_L2_SUBFLOW) {
+ 			state = FIELD_GET(AIROHA_FOE_IB1_BIND_STATE, hwe->ib1);
+@@ -1105,15 +1128,21 @@
+ 		e->hash = hash;
+ 	}
+ 
+-	if (commit_done)
++	if (commit_done) {
++		ppe_dbg("insert: committed sw->hw hash=%x\n", hash);
+ 		goto unlock;
++	}
+ 
+ l2_lookup:
+ 	airoha_ppe_foe_set_bridge_addrs(&br, eth_hdr(skb));
+ 	e = rhashtable_lookup_fast(&ppe->l2_flows, &br,
+ 				   airoha_l2_flow_table_params);
+-	if (e)
++	if (e) {
++		ppe_dbg("insert: l2 subflow commit hash=%x\n", hash);
+ 		airoha_ppe_foe_commit_subflow_entry(ppe, e, hash, rx_wlan);
++	} else {
++		ppe_dbg("insert: no sw match hash=%x\n", hash);
++	}
+ unlock:
+ 	spin_unlock_bh(&ppe_lock);
+ }
+@@ -1267,11 +1296,15 @@
+ 	u16 addr_type = 0;
+ 
+ 	if (rhashtable_lookup(&eth->flow_table, &f->cookie,
+-			      airoha_flow_table_params))
++			      airoha_flow_table_params)) {
++		ppe_dbg("replace reject: EEXIST cookie=%lx\n", f->cookie);
+ 		return -EEXIST;
++	}
+ 
+-	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META))
++	if (!flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_META)) {
++		ppe_dbg("replace reject: no META key\n");
+ 		return -EOPNOTSUPP;
++	}
+ 
+ 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_CONTROL)) {
+ 		struct flow_match_control match;
+@@ -1279,9 +1312,12 @@
+ 		flow_rule_match_control(rule, &match);
+ 		addr_type = match.key->addr_type;
+ 		if (flow_rule_has_control_flags(match.mask->flags,
+-						f->common.extack))
++						f->common.extack)) {
++			ppe_dbg("replace reject: control flags\n");
+ 			return -EOPNOTSUPP;
++		}
+ 	} else {
++		ppe_dbg("replace reject: no CONTROL key\n");
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+@@ -1291,6 +1327,7 @@
+ 		flow_rule_match_basic(rule, &match);
+ 		l4proto = match.key->ip_proto;
+ 	} else {
++		ppe_dbg("replace reject: no BASIC key\n");
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+@@ -1311,6 +1348,7 @@
+ 			memcpy(data.eth.h_dest, match.key->dst, ETH_ALEN);
+ 			memcpy(data.eth.h_source, match.key->src, ETH_ALEN);
+ 		} else {
++			ppe_dbg("replace reject: bridge w/o ETH_ADDRS\n");
+ 			return -EOPNOTSUPP;
+ 		}
+ 		break;
+@@ -1321,14 +1359,17 @@
+ 		offload_type = PPE_PKT_TYPE_IPV6_ROUTE_5T;
+ 		break;
+ 	default:
++		ppe_dbg("replace reject: addr_type %d\n", addr_type);
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+ 	flow_action_for_each(i, act, &rule->action) {
+ 		switch (act->id) {
+ 		case FLOW_ACTION_MANGLE:
+-			if (offload_type == PPE_PKT_TYPE_BRIDGE)
++			if (offload_type == PPE_PKT_TYPE_BRIDGE) {
++				ppe_dbg("replace reject: bridge mangle\n");
+ 				return -EOPNOTSUPP;
++			}
+ 
+ 			if (act->mangle.htype == FLOW_ACT_MANGLE_HDR_TYPE_ETH)
+ 				airoha_ppe_flow_mangle_eth(act, &data.eth);
+@@ -1340,8 +1381,11 @@
+ 			break;
+ 		case FLOW_ACTION_VLAN_PUSH:
+ 			if (data.vlan.num == 2 ||
+-			    act->vlan.proto != htons(ETH_P_8021Q))
++			    act->vlan.proto != htons(ETH_P_8021Q)) {
++				ppe_dbg("replace reject: vlan push num=%d proto=%04x\n",
++					data.vlan.num, ntohs(act->vlan.proto));
+ 				return -EOPNOTSUPP;
++			}
+ 
+ 			data.vlan.hdr[data.vlan.num].id = act->vlan.vid;
+ 			data.vlan.hdr[data.vlan.num].proto = act->vlan.proto;
+@@ -1350,25 +1394,35 @@
+ 		case FLOW_ACTION_VLAN_POP:
+ 			break;
+ 		case FLOW_ACTION_PPPOE_PUSH:
+-			if (data.pppoe.num == 1 || data.vlan.num == 2)
++			if (data.pppoe.num == 1 || data.vlan.num == 2) {
++				ppe_dbg("replace reject: pppoe push num=%d vlan=%d\n",
++					data.pppoe.num, data.vlan.num);
+ 				return -EOPNOTSUPP;
++			}
+ 
+ 			data.pppoe.sid = act->pppoe.sid;
+ 			data.pppoe.num++;
+ 			break;
+ 		default:
++			ppe_dbg("replace reject: action id %d\n", act->id);
+ 			return -EOPNOTSUPP;
+ 		}
+ 	}
+ 
+ 	if (!is_valid_ether_addr(data.eth.h_source) ||
+-	    !is_valid_ether_addr(data.eth.h_dest))
++	    !is_valid_ether_addr(data.eth.h_dest)) {
++		ppe_dbg("replace reject: invalid eth src=%pM dst=%pM\n",
++			data.eth.h_source, data.eth.h_dest);
+ 		return -EINVAL;
++	}
+ 
+ 	err = airoha_ppe_foe_entry_prepare(eth, &hwe, odev, offload_type,
+ 					   &data, l4proto, dsfield,
+ 					   &egress_dev);
+ 	if (err) {
++		ppe_dbg("replace reject: entry_prepare err=%d pon=%d\n", err,
++			egress_dev ?
++			!!(egress_dev->flags & AIROHA_PRIV_F_PON) : -1);
+ 		if (err == -EOPNOTSUPP && egress_dev &&
+ 		    egress_dev->flags & AIROHA_PRIV_F_PON)
+ 			NL_SET_ERR_MSG_MOD(f->common.extack,
+@@ -1379,13 +1433,16 @@
+ 	if (flow_rule_match_key(rule, FLOW_DISSECTOR_KEY_PORTS)) {
+ 		struct flow_match_ports ports;
+ 
+-		if (offload_type == PPE_PKT_TYPE_BRIDGE)
++		if (offload_type == PPE_PKT_TYPE_BRIDGE) {
++			ppe_dbg("replace reject: bridge ports\n");
+ 			return -EOPNOTSUPP;
++		}
+ 
+ 		flow_rule_match_ports(rule, &ports);
+ 		data.src_port = ports.key->src;
+ 		data.dst_port = ports.key->dst;
+ 	} else if (offload_type != PPE_PKT_TYPE_BRIDGE) {
++		ppe_dbg("replace reject: no ports key\n");
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+@@ -1412,8 +1469,10 @@
+ 		if (act->id != FLOW_ACTION_MANGLE)
+ 			continue;
+ 
+-		if (offload_type == PPE_PKT_TYPE_BRIDGE)
++		if (offload_type == PPE_PKT_TYPE_BRIDGE) {
++			ppe_dbg("replace reject: bridge mangle pass2\n");
+ 			return -EOPNOTSUPP;
++		}
+ 
+ 		switch (act->mangle.htype) {
+ 		case FLOW_ACT_MANGLE_HDR_TYPE_TCP:
+@@ -1427,17 +1486,23 @@
+ 			/* handled earlier */
+ 			break;
+ 		default:
++			ppe_dbg("replace reject: mangle htype %d\n",
++				act->mangle.htype);
+ 			return -EOPNOTSUPP;
+ 		}
+ 
+-		if (err)
++		if (err) {
++			ppe_dbg("replace reject: mangle err %d\n", err);
+ 			return err;
++		}
+ 	}
+ 
+ 	if (addr_type == FLOW_DISSECTOR_KEY_IPV4_ADDRS) {
+ 		err = airoha_ppe_foe_entry_set_ipv4_tuple(&hwe, &data, true);
+-		if (err)
++		if (err) {
++			ppe_dbg("replace reject: set_ipv4_tuple err %d\n", err);
+ 			return err;
++		}
+ 	}
+ 
+ 	e = kzalloc(sizeof(*e), GFP_KERNEL);
+@@ -1449,9 +1514,15 @@
+ 	e->egress_dev = egress_dev;
+ 	memcpy(&e->data, &hwe, sizeof(e->data));
+ 
++	ppe_dbg("replace accepted: type=%d odev=%s vlan=%d pppoe=%d sid=%d proto=%d\n",
++		offload_type, odev ? odev->name : "null", data.vlan.num,
++		data.pppoe.num, data.pppoe.sid, l4proto);
++
+ 	err = airoha_ppe_foe_flow_commit_entry(eth->ppe, e);
+-	if (err)
++	if (err) {
++		ppe_dbg("replace reject: sw commit err %d\n", err);
+ 		goto free_entry;
++	}
+ 
+ 	err = rhashtable_insert_fast(&eth->flow_table, &e->node,
+ 				     airoha_flow_table_params);
+@@ -1674,8 +1745,10 @@
+ 	 * the net_devices are registered or initialized. Delay offloading
+ 	 * until all net_devices are registered in the system.
+ 	 */
+-	if (!test_bit(DEV_STATE_REGISTERED, &eth->state))
++	if (!test_bit(DEV_STATE_REGISTERED, &eth->state)) {
++		ppe_dbg("setup_tc: reject EBUSY dev not registered\n");
+ 		return -EBUSY;
++	}
+ 
+ 	mutex_lock(&flow_offload_mutex);
+ 
+@@ -1696,15 +1769,21 @@
+ 	u32 ppe_hash_mask = airoha_ppe_get_total_num_entries(ppe) - 1;
+ 	u16 now, diff;
+ 
+-	if (hash > ppe_hash_mask)
++	if (hash > ppe_hash_mask) {
++		ppe_dbg("check_skb: hash %x out of range\n", hash);
+ 		return;
++	}
+ 
+ 	now = (u16)jiffies;
+ 	diff = now - ppe->foe_check_time[hash];
+-	if (diff < HZ / 10)
++	if (diff < HZ / 10) {
++		ppe_dbg("check_skb: rate-limited hash=%x diff=%u\n", hash, diff);
+ 		return;
++	}
+ 
+ 	ppe->foe_check_time[hash] = now;
++	ppe_dbg("check_skb: hash=%x proto=%04x rx_wlan=%d\n",
++		hash, skb->protocol, rx_wlan);
+ 	airoha_ppe_foe_insert_entry(ppe, skb, hash, rx_wlan);
+ }
+ 
