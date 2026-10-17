@@ -21,6 +21,11 @@ on:
         options:
           - "no"
           - "yes"
+      build_label:
+        description: Firmware build label written to /etc/pon-build-tag (default dev-<suite sha>)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -201,6 +206,21 @@ jobs:
       - name: Download sources
         working-directory: ponwrt
         run: make download -j"$(nproc)"
+
+      # 固件版本标记（10-17 A+B 方案，用户批准）：标记随 files/ 叠加层进 squashfs，
+      # 只信 /rom 本体永不过期（写 UCI config/openwrt_release 会被刷机配置保留机制
+      # 弄成过期标记——方案论证见 SESSION-SYNC）。A 侧配套：init 开机把 /rom 的标记
+      # 复制到 /etc 供 LuCI 状态页显示；验收单首项 cat /etc/pon-build-tag。
+      - name: Write firmware build tag
+        run: |
+          label="${{ inputs.build_label }}"
+          [ -n "$label" ] || label="dev-$(git -C onu-build rev-parse --short HEAD)"
+          suite_sha=$(git -C onu-build rev-parse --short HEAD)
+          ponwrt_rev=$(git -C ponwrt rev-parse --short HEAD)
+          build_date=$(date -u +%Y-%m-%d)
+          mkdir -p onu-build/files/etc
+          printf '%s · %s · ponwrt %s · %s\n' "$label" "$suite_sha" "$ponwrt_rev" "$build_date" > onu-build/files/etc/pon-build-tag
+          echo "pon-build-tag: $(cat onu-build/files/etc/pon-build-tag)"
 
       # airoha-pond 双版本（补丁版=北京联通 10G EPON OAM 兼容，stock=原厂）
       # + 补丁开关脚本 + 开机自应用 + watchdog。files/ 整树合入 rootfs。

@@ -36,6 +36,11 @@ on:
         options:
           - "yes"
           - "no"
+      build_label:
+        description: Firmware build label written to /etc/pon-build-tag (default dev-<suite sha>)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -232,6 +237,19 @@ jobs:
       - name: Download sources
         working-directory: iwrt
         run: make download -j"$(nproc)"
+
+      # 固件版本标记（与 build.yml 同方案，10-17 用户批准）：标记进 squashfs 本体，
+      # A 侧 init 开机复制 /rom→/etc 供 LuCI 显示。基底 rev 取实际检出的 iwrt 树。
+      - name: Write firmware build tag
+        run: |
+          label="${{ inputs.build_label }}"
+          [ -n "$label" ] || label="dev-$(git -C onu-build rev-parse --short HEAD)"
+          suite_sha=$(git -C onu-build rev-parse --short HEAD)
+          iwrt_rev=$(git -C iwrt rev-parse --short HEAD)
+          build_date=$(date -u +%Y-%m-%d)
+          mkdir -p onu-build/files/etc
+          printf '%s · %s · ${{ matrix.variant }} %s · %s\n' "$label" "$suite_sha" "$iwrt_rev" "$build_date" > onu-build/files/etc/pon-build-tag
+          echo "pon-build-tag: $(cat onu-build/files/etc/pon-build-tag)"
 
       # airoha-pond 双版本（补丁版=北京联通 10G EPON OAM 兼容，stock=原厂）
       # + 补丁开关脚本 + 开机自应用 + watchdog。files/ 整树合入 rootfs。
