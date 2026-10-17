@@ -126,13 +126,21 @@ jobs:
       - name: Build kernel
         working-directory: ponwrt
         run: |
-          # 五轮实证（run 39043618565）：airoha 的 Device/Default 定义了
-          # KERNEL_INITRAMFS，内核镜像构建时 CONFIG_INITRAMFS_SOURCE 指向
-          # rootfs 目录（build_dir/target-*/root-airoha）。全量构建里
-          # package/install 先于 target/linux/install，目录已存在；单包
-          # workflow 跳过 rootfs 段 → gen_initramfs.sh: Cannot open
-          # root-airoha（kernel 步 Error 2）。补空目录即可——本步只要
-          # modules/Module.symvers，空 initramfs 不影响。
+          # 五轮（39043618565）实证：KERNEL_INITRAMFS 机制使内核镜像构建
+          # 需要 rootfs 目录（gen_initramfs.sh: Cannot open root-airoha）；
+          # 六轮（39048766106）进一步实证：initramfs 镜像链还要 root.orig
+          # 快照 + per-device target-dir（opkg/apk 装设备包），单包 workflow
+          # 跳过 rootfs 段无法满足。本步只要 modules/Module.symvers，不
+          # 要任何固件镜像——airoha 的 image/Makefile Device/Default 与
+          # image/an7581.mk 每台设备都定义了 KERNEL_INITRAMFS
+          # （recovery.itb），全部清空（连同续行）即整链跳过
+          # （image.mk:637 $(if $$(KERNEL_INITRAMFS),...) 为空即不构建）。
+          sed -ri '/^[[:space:]]*KERNEL_INITRAMFS([[:space:]]*):?=[[:space:]]*kernel-bin/,+1d' \
+              target/linux/airoha/image/Makefile target/linux/airoha/image/*.mk
+          grep -rn "KERNEL_INITRAMFS[[:space:]]*:?=[[:space:]]*kernel-bin" \
+              target/linux/airoha/image/ || echo "KERNEL_INITRAMFS 已全清空"
+          # 兜底：kernel usr 的 CONFIG_INITRAMFS_SOURCE 若指向 rootfs
+          # 目录，空目录也须存在。
           tdir=$(ls -d build_dir/target-*/ | head -1)
           echo "target dir: $tdir"
           mkdir -p "${tdir}root-airoha"
