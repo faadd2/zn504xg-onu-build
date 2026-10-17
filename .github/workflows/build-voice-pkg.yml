@@ -114,17 +114,26 @@ jobs:
         working-directory: ponwrt
         run: make toolchain/install -j"$(nproc)"
 
-      # KernelPackage 依赖内核树（vermagic），kernel 编译不可省
+      # KernelPackage 依赖内核树（vermagic），kernel 编译不可省。
+      # 二轮实证（run 39035004018）：`make target/linux/compile` 在全新树上
+      # 静默空转（exit 0、零输出），包编译步随之 no-op 假成功——改走 install
+      # （prepare+compile+install 强制全做，与全量构建同路径），并硬校验内核树。
       - name: Build kernel
         working-directory: ponwrt
-        run: make target/linux/compile -j"$(nproc)"
+        run: |
+          make target/linux/install -j"$(nproc)"
+          kdir=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
+          [ -n "$kdir" ] || kdir=$(ls -d build_dir/target-*/linux-* 2>/dev/null | head -1)
+          echo "kernel dir: $kdir"
+          ls "$kdir" | head -5
+          [ -n "$kdir" ] && [ -f "$kdir/Module.symvers" ] || { echo "::error:: kernel tree not prepared (Module.symvers missing)"; exit 1; }
 
       - name: Build en75xx-voip packages
         working-directory: ponwrt
         run: |
-          make package/en75xx-voip/compile -j"$(nproc)" || {
+          make package/en75xx-voip/compile -j"$(nproc)" V=s || {
             echo "::warning::parallel build failed — retrying single-threaded V=s"
-            make package/en75xx-voip/compile -j1 V=s
+            make package/en75xx-voip/compile -j1 V=sc
           }
 
       - name: Verify artifacts
