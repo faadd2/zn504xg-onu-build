@@ -99,7 +99,8 @@ jobs:
                    onu-suite/luci-app-onu-iptv onu-suite/luci-app-onu-voice \
                    onu-suite/luci-app-onu-mgmt onu-suite/luci-app-onu-migrate \
                    onu-suite/luci-app-speedcheck onu-suite/luci-app-netspeedtest \
-                   onu-suite/luci-app-airoha-npu onu-suite/zn504xg-defaults; do
+                   onu-suite/luci-app-airoha-npu onu-suite/zn504xg-defaults \
+                   onu-suite/kmod-sound-soc-an7581; do
             cp -r "$p" ponwrt/package/
           done
           # rpcd 后端可执行位兜底：onu-pond-patch 曾因 git 100644 进固件丢 +x
@@ -124,9 +125,18 @@ jobs:
           # 不进内核 config 片段就会在 syncconfig 卡在交互提问（v7b 双腿因此挂）。
           # 内核符号的正确通道是子目标 config-6.18（顶层 .config 里的 CONFIG_SND_*
           # 不会传入内核树，B 已实测）。
-          printf '%s\n' CONFIG_SND=y CONFIG_SND_SOC=y CONFIG_SND_SOC_AN7581=y CONFIG_SND_SOC_AN7581_LE9643=y \
+          # 10-17 起 =m 模块方式（A 拍板）：baresip-mod-alsa 硬依赖固件内可 opkg 的
+          # kmod-sound-core（快照源 kmod vermagic 不符装不上），SND 全家改模块后
+          # AN7581/LE9643 两个自定义符号由 suite 的 kmod-sound-soc-an7581 包认领
+          # （OpenWrt 不给无 KernelPackage 定义的 =m 模块出包，会被构建丢弃）。
+          printf '%s\n' CONFIG_SND=m CONFIG_SND_SOC=m CONFIG_SND_SOC_AN7581=m CONFIG_SND_SOC_AN7581_LE9643=m \
             >> ponwrt/target/linux/airoha/an7581/config-6.18
           tail -8 ponwrt/target/linux/airoha/an7581/config-6.18
+          # 语音 kmod 包选入 rootfs（只在此 voice=yes 路径追加，stock/无语音 onu 构建不受影响）
+          printf '%s\n' CONFIG_PACKAGE_kmod-sound-core=y CONFIG_PACKAGE_kmod-sound-soc-core=y \
+            CONFIG_PACKAGE_kmod-sound-soc-an7581=y CONFIG_PACKAGE_kmod-sound-soc-an7581-le9643=y \
+            >> onu-build/config/onu-frag.config
+          tail -6 onu-build/config/onu-frag.config
 
       - name: Apply dts patches (voice, target tree)
         if: inputs.voice_kernel_patches == 'yes'
@@ -266,19 +276,26 @@ jobs:
           find bin/targets -maxdepth 3 \( -name "*.itb" -o -name "*.bin" -o -name "*.img" -o -name "*.gz" \) 2>/dev/null | head -40
 
       # manifest 硬门禁（A 10-16 要求）：教训=缺包只在刷机后才暴露，必须在打包前拦。
-      # EN8811H 驱动+固件=两腿都要（2.5G 口）；migrate=仅 onu-suite 腿；ppp 版本防回退。
+      # EN8811H 驱动+固件=两腿都要（2.5G 口）；migrate=仅 onu-suite 腿；ppp 版本防回退；
+      # openssh-sftp-server=两腿都要（sftp 传固件/抓包，A 10-17 要求）；
+      # 语音 kmod 三件套=voice=yes 时必查（SND 改 =m 后的回归防线）。
       - name: Manifest hard gate
         working-directory: ponwrt/bin/targets/airoha/an7581
         run: |
           mans=( *.manifest )
           [ ${#mans[@]} -gt 0 ] || { echo "::error::no manifest files!"; exit 1; }
-          for pkg in kmod-phy-airoha-en8811h airoha-en8811h-firmware; do
+          for pkg in kmod-phy-airoha-en8811h airoha-en8811h-firmware openssh-sftp-server; do
             grep -h "^$pkg - " "${mans[@]}" | sort -u || true
             grep -hq "^$pkg - " "${mans[@]}" || { echo "::error:: $pkg missing from manifest!"; exit 1; }
           done
           grep -hq "^ppp - 2\.5\.1" "${mans[@]}" || { echo "::error:: ppp is not 2.5.1!"; exit 1; }
           if [ "${{ matrix.inject_suite }}" = "yes" ]; then
             grep -hq "^luci-app-onu-migrate - " "${mans[@]}" || { echo "::error:: luci-app-onu-migrate missing from manifest!"; exit 1; }
+          fi
+          if [ "${{ inputs.voice_kernel_patches }}" = "yes" ]; then
+            for pkg in kmod-sound-core kmod-sound-soc-core kmod-sound-soc-an7581-le9643; do
+              grep -hq "^$pkg - " "${mans[@]}" || { echo "::error:: voice build missing $pkg from manifest!"; exit 1; }
+            done
           fi
           echo "manifest gate OK: ${mans[*]}"
 
