@@ -117,11 +117,10 @@ index 9c3005d..485d50e 100644
  };
  
  &en7581_pinctrl {
-@@ -150,6 +231,21 @@
+@@ -150,4 +231,18 @@
  			pins = "gpio46";
  		};
  	};
-+}
 +	/* PCM bus plus the ZSI-multiplexed SLIC control channel and CS1. */
 +	pcm_spi_pins: pcm-spi-pins {
 +		mux {
