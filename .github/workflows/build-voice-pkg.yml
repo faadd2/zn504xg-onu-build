@@ -140,6 +140,14 @@ jobs:
           # ② Manifest 步（image.mk:1034 install 目标无条件执行，
           #    apk list --manifest 要读 root.orig 的 apk 数据库）——
           #    手工建 root.orig-airoha 并 apk --initdb 空库兜住。
+          # 八轮（39065307315）再再实证：即便 ①② 全做，target-dir-%
+          # 仍被拉起（image.mk:413），其 recipe 的 `apk add <设备包>`
+          # 无 '-' 前缀、硬失败——而 host apk 二进制由完整构建的
+          # package 链生成（staging_dir/host/bin/apk），单包 workflow
+          # 永远没有（Error 127）。空 rootfs 本来就不要任何包：造
+          # exit 0 的 apk 存根 + 00-dummy.post-install 种子（不种则
+          # prepare_rootfs 的 *.post-install glob 落空、bash 字面路径
+          # exit 1），让镜像机件全部空转通过。
           sed -ri '/^[[:space:]]*KERNEL_INITRAMFS([[:space:]]*):?=[[:space:]]*kernel-bin/,+1d' \
               target/linux/airoha/image/Makefile target/linux/airoha/image/*.mk
           sed -ri '/^[[:space:]]*IMAGES([[:space:]]*):=/d' \
@@ -149,9 +157,11 @@ jobs:
           tdir=$(ls -d build_dir/target-*/ | head -1)
           echo "target dir: $tdir"
           mkdir -p "${tdir}root-airoha"
-          mkdir -p "${tdir}root.orig-airoha"
-          staging_dir/host/bin/apk --root "${tdir}root.orig-airoha" \
-              add --initdb --no-cache --repositories-file /dev/null || true
+          mkdir -p "${tdir}root.orig-airoha/lib/apk/db"
+          printf '#!/bin/sh\nexit 0\n' > staging_dir/host/bin/apk
+          chmod +x staging_dir/host/bin/apk
+          printf '#!/bin/sh\nexit 0\n' > "${tdir}root.orig-airoha/lib/apk/db/00-dummy.post-install"
+          chmod +x "${tdir}root.orig-airoha/lib/apk/db/00-dummy.post-install"
           make target/linux/install -j"$(nproc)" || {
             echo "::warning::parallel kernel build failed — retrying single-threaded V=s"
             make target/linux/install -j1 V=s
