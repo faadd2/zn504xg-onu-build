@@ -301,7 +301,11 @@ jobs:
           fi
           echo "manifest gate OK: ${mans[*]}"
 
+      # if: always()（A 10-17 20:45 设计、用户批准）：门禁拦红后固件仍打包留存，
+      # 治本 build-2 式"编译成功却零留存"；空目录拒绝保护仍在，Release 由
+      # release job 的 needs.build.result == 'success' 把守，不合格固件不进 Release
       - name: Pack firmware images
+        if: always()
         run: |
           mkdir -p release
           # 固件镜像资产：factory/sysupgrade/itb + 校验和（对标各固件项目 release）
@@ -332,6 +336,7 @@ jobs:
           fi
 
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ponwrt-an7581-${{ matrix.variant }}-${{ github.run_number }}
