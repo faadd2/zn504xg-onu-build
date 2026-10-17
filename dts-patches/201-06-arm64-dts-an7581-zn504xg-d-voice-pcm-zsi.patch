@@ -1,0 +1,157 @@
+ZN504XG-D voice Path B: bring up the Le9643 SLIC over PCM1 + ZSI.
+
+Replaces the abandoned AFE/ASoC route (201-04/201-05, now deprecated and
+explicitly disabled here) with the airoha_voip PCM/ZSI driver stack:
+
+  pcm0  airoha,en7581-pcm  @ 0x1fbd0000, GIC_SPI 27, EN7581_PCM1_RST,
+        naoki66's validated EN7581 interface-control value 0xf5051306
+  zsi0  airoha,en7581-zsi  @ 0x1fbd1000, EN7523_CLK_SLIC clock,
+        EN7581_PCM1_ZSI_ISI_RST reset
+  slic0 microsemi,le9643   one FXS line at bus slot 4 (DMA channel 0)
+
+Pin hypothesis: SLIC routed to the pcm_spi group (GPIO18-25) + pcm_spi_cs1
+(GPIO43), the layout naoki66 validated on the XG2010G (same SoC).  Caveat:
+GPIO18/19/20/24 also drive the PON/LOS/Internet/phone LEDs, so the pinmux
+claim may conflict with leds-gpio by probe order.  If the SLIC does not
+answer on the ZSI bus at runtime, retry the pcm1 group (GPIO22-25, only
+the phone LED overlaps) before assuming a wiring fault.
+
+Companion driver patch: voice/airoha-voip/patches/001-en7581-support.patch
+adds the en7581 compatibles to the pcm/zsi/le9642 drivers.
+
+Signed-off-by: ZN504XG-D voice porting project
+diff --git a/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi b/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi
+index c629ec4..cf3f54f 100644
+--- a/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi
++++ b/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi
+@@ -103,6 +103,8 @@
+ 
+ 	sound-slic {
+ 		compatible = "airoha,an7581-slic-sound";
++		/* Path A (ASoC AFE voice) abandoned; kept only as documentation. */
++		status = "disabled";
+ 
+ 		platform {
+ 			sound-dai = <&afe>;
+@@ -118,6 +120,86 @@
+ 		regulator-max-microvolt = <3300000>;
+ 		regulator-name = "fixed-3.3V";
+ 	};
++
++	/*
++	 * Voice stack (Path B): Microsemi Le9643 SLIC on the PCM1 engine with
++	 * the ZSI transport, per the airoha_voip driver stack.  Replaces the
++	 * abandoned AFE/ASoC path (see reports/语音路线裁决).
++	 *
++	 * Pin hypothesis: the SLIC digital lines are routed to the pcm_spi
++	 * group (GPIO18-25) plus chip select pcm_spi_cs1 (GPIO43), the same
++	 * layout naoki66 validated on the XG2010G (AN7581).  Caveat: GPIO18/19/
++	 * 20/24 drive the PON/LOS/Internet/phone LEDs, so the pinmux claim can
++	 * conflict with leds-gpio depending on probe order.  If the SLIC does
++	 * not answer on the ZSI bus at runtime, retry with the pcm1 group
++	 * (GPIO22-25, only GPIO24/phone LED overlaps) before assuming a
++	 * wiring fault.
++	 *
++	 * IRQ and register layout follow the vendor map naoki66 uses on the
++	 * XG2010G: PCM at 0x1fbd0000, ZSI wrapper at +0x1000, GIC SPI 27.
++	 */
++	pcm0: pcm@1fbd0000 {
++		compatible = "airoha,en7581-pcm";
++		reg = <0x0 0x1fbd0000 0x0 0x1000>;
++		reg-names = "pcm";
++
++		interrupts = <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>;
++
++		resets = <&scuclk EN7581_PCM1_RST>;
++		reset-names = "pcm";
++
++		/* naoki66's validated EN7581 interface-control value. */
++		airoha,pcm-interface-control = <0xf5051306>;
++
++		airoha,tx-slot-config = <0x10101000 0x10301020
++					 0x10501040 0x10701060>;
++		airoha,rx-slot-config = <0x10101000 0x10301020
++					 0x10501040 0x10701060>;
++		airoha,dma-channel-mask = <0x01>;
++
++		status = "okay";
++	};
++
++	zsi0: zsi@1fbd1000 {
++		compatible = "airoha,en7581-zsi";
++		reg = <0x0 0x1fbd1000 0x0 0x1000>;
++		reg-names = "zsi";
++
++		clocks = <&scuclk EN7523_CLK_SLIC>;
++		clock-names = "slic";
++		resets = <&scuclk EN7581_PCM1_ZSI_ISI_RST>;
++		reset-names = "zsi";
++
++		/*
++		 * Only zsi0 claims the pins: muxing the same group from pcm0
++		 * as well would just earn a second -EBUSY style warning from
++		 * the pinmux core, the mux result is identical.
++		 */
++		pinctrl-names = "default";
++		pinctrl-0 = <&pcm_spi_pins>, <&pcm_spi_cs1_pins>;
++
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		airoha,zsi-gap-us = <5000>;
++
++		status = "okay";
++
++		slic0: slic@0 {
++			compatible = "microsemi,le9643";
++			reg = <0>;
++
++			airoha,zsi = <&zsi0>;
++			airoha,pcm = <&pcm0>;
++			airoha,lines = <1>;
++
++			/* Single FXS line; bus slot 4 = DMA channel 0 with the
++			 * default timeslot table above. */
++			airoha,bus-slots = <4>;
++
++			status = "okay";
++		};
++	};
+ };
+ 
+ &en7581_pinctrl {
+@@ -158,6 +240,21 @@
+ 			pins = "gpio46";
+ 		};
+ 	};
++
++	/* PCM bus plus the ZSI-multiplexed SLIC control channel and CS1. */
++	pcm_spi_pins: pcm-spi-pins {
++		mux {
++			function = "pcm_spi";
++			groups = "pcm_spi";
++		};
++	};
++
++	pcm_spi_cs1_pins: pcm-spi-cs1-pins {
++		mux {
++			function = "pcm_spi";
++			groups = "pcm_spi_cs1";
++		};
++	};
+ };
+ 
+ &snfi {
+@@ -413,3 +510,12 @@
+ 	status = "okay";
+ 	resets = <&scuclk EN7581_I2S_RST>;
+ };
++
++/*
++ * Path A AFE stays off even though 201-04/201-05 enabled it: the PCM/ZSI
++ * stack (201-06) replaces it.  201-04/201-05 are deprecated and can be
++ * dropped from the series; this override keeps the tree correct either way.
++ */
++&afe {
++	status = "disabled";
++};

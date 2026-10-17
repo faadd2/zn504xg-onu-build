@@ -1,0 +1,27 @@
+ZN504XG-D build: skip the ISI transport and ProSLIC SLIC modules.
+
+The board wires a Microsemi Le9643 over ZSI, so en75xx-isi-spi and
+en75xx-slic-si3219x (and with them the whole vendor/proslic tree) are
+dead build weight and a modern-kernel warning risk.  Comment the two
+obj-m lines instead of deleting them so upstream merges stay trivial.
+
+Signed-off-by: ZN504XG-D voice porting project
+diff --git a/src/Makefile b/src/Makefile
+index b1a8e6a..dc2497c 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -15,9 +15,12 @@ obj-m += en75xx-lec.o
+ obj-m += en75xx-pcm.o
+ obj-m += en75xx-voice.o
+ obj-m += en75xx-zsi.o
+-obj-m += en75xx-isi-spi.o
+ obj-m += en75xx-slic-le9642.o
+-obj-m += en75xx-slic-si3219x.o
++# ZN504XG-D build: the ISI transport and the ProSLIC SLIC are not wired on
++# this board; skipping them keeps the vendor/proslic tree out of the build.
++# The lines are commented, not deleted, so a merge from upstream stays easy.
++#obj-m += en75xx-isi-spi.o
++#obj-m += en75xx-slic-si3219x.o
+ 
+ en75xx-lec-objs            := ../vendor/oslec/echo.o
+ 
