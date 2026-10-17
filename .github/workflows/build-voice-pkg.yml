@@ -126,6 +126,16 @@ jobs:
       - name: Build kernel
         working-directory: ponwrt
         run: |
+          # 五轮实证（run 39043618565）：airoha 的 Device/Default 定义了
+          # KERNEL_INITRAMFS，内核镜像构建时 CONFIG_INITRAMFS_SOURCE 指向
+          # rootfs 目录（build_dir/target-*/root-airoha）。全量构建里
+          # package/install 先于 target/linux/install，目录已存在；单包
+          # workflow 跳过 rootfs 段 → gen_initramfs.sh: Cannot open
+          # root-airoha（kernel 步 Error 2）。补空目录即可——本步只要
+          # modules/Module.symvers，空 initramfs 不影响。
+          tdir=$(ls -d build_dir/target-*/ | head -1)
+          echo "target dir: $tdir"
+          mkdir -p "${tdir}root-airoha"
           make target/linux/install -j"$(nproc)" || {
             echo "::warning::parallel kernel build failed — retrying single-threaded V=s"
             make target/linux/install -j1 V=s
