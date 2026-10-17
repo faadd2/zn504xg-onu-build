@@ -6,6 +6,7 @@ START=10
 
 start() {
     [ -f /rom/etc/pon-build-tag ] && cp -f /rom/etc/pon-build-tag /etc/pon-build-tag
+    return 0
 }
 
 stop() {
