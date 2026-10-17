@@ -52,10 +52,17 @@ Path A（上游 ASoC AFE 200-02 + machine 驱动）已判死：AFE 手动使能�
 
 ## B 会话编译须知
 
-1. workflow 需把 `voice/openwrt/package/en75xx-voip/` 拷入 `ponwrt/package/`，
+A 已完成（随 Path B 提交推送）：Path A 死补丁移出（kernel 201-01..03、dts
+201-04/05）、build.yml 的 SND_SOC 四行删除、201-06 重生成自包含版（纯净树
+验证通过）、lint 与登记表落地（`scripts/lint-patch-names.sh` +
+`docs/patch-registry.md`，全绿）。
+
+B 剩余三项（build-3 前）：
+
+1. workflow 把 `voice/openwrt/package/en75xx-voip/` 拷入 `ponwrt/package/`，
    并把 `voice/airoha-voip/patches/` 拷为 `ponwrt/package/en75xx-voip/patches/`
    （OpenWrt 自动应用到下载源码）。
 2. config 片段加 `CONFIG_PACKAGE_kmod-en75xx-slic-le9642=y`（依赖链自动带
-   lec+pcm）；**删除 Path A 的 SND_SOC 四行**（201-03/04/05 已由 201-06 取代，
-   kernel-patches/201-03 与 dts-patches/201-04/05 可移出 series）。
-3. 首次编译 download 阶段回填 Makefile 里的 PKG_MIRROR_HASH 占位符。
+   lec+pcm）。
+3. 首次编译 download 阶段回填 Makefile 里的 PKG_MIRROR_HASH 占位符（预期首跑
+   在 download 步失败并打印期望哈希，回填后重跑即可）。

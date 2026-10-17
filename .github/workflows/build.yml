@@ -109,19 +109,14 @@ jobs:
       # dts-patches/ 打到 OpenWrt 目标树（target dts 不进内核源码树，
       # 见 DEVICE_DTS_DIR := ../dts），必须分开应用。
       # 已于 6.18.55 真实源文件 + ponwrt master dtsi 上逐一 git apply 验证通过。
-      - name: Inject kernel patches (voice / ASoC AN7581)
+      - name: Inject kernel patches (voice / PPE)
         if: inputs.voice_kernel_patches == 'yes'
         run: |
           ls onu-build/kernel-patches/
           cp onu-build/kernel-patches/*.patch ponwrt/target/linux/airoha/patches-6.18/
           ls ponwrt/target/linux/airoha/patches-6.18/ | tail -10
-          # 201-03 新增的 SND_SOC_AN7581_LE9643 在内核 Kconfig 里无默认值，
-          # 不进内核 config 片段就会在 syncconfig 卡在交互提问（v7b 双腿因此挂）。
-          # 内核符号的正确通道是子目标 config-6.18（顶层 .config 里的 CONFIG_SND_*
-          # 不会传入内核树，B 已实测）。
-          printf '%s\n' CONFIG_SND=y CONFIG_SND_SOC=y CONFIG_SND_SOC_AN7581=y CONFIG_SND_SOC_AN7581_LE9643=y \
-            >> ponwrt/target/linux/airoha/an7581/config-6.18
-          tail -8 ponwrt/target/linux/airoha/an7581/config-6.18
+          # Path A 的 SND_SOC config 注入已随 201-01..03 死补丁一并移除
+          # （2026-10-17）；Path B 语音走 en75xx-voip feed 包，不经内核 config。
 
       - name: Apply dts patches (voice, target tree)
         if: inputs.voice_kernel_patches == 'yes'
