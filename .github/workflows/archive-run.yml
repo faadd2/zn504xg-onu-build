@@ -1,0 +1,50 @@
+name: Archive a past build run into a Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Build workflow run id to archive (from the Actions URL)
+        required: true
+        type: string
+      tag:
+        description: Release tag, e.g. v1-20261013
+        required: true
+        type: string
+      title:
+        description: Release title
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download artifacts of the given run
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pattern: ponwrt-an7581-*
+          path: assets
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -lh assets/
+
+      - name: Publish release (archive)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.title || inputs.tag }}
+          body: |
+            归档自 workflow run #${{ inputs.run_id }} 的产物。
+
+            - `*-images.tar.zst`：固件镜像（factory / sysupgrade / itb + sha256sums）
+            - `*-packages.tar.zst`：完整软件包仓库（apk feed，可整套作为 distfeed）
+            - 老格式 `*-{run_number}.tar.zst`（若存在）为镜像+软件包合一打包
+          files: assets/*.tar.zst

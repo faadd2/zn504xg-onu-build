@@ -1,0 +1,65 @@
+# zn504xg-onu-build 迭代日志
+
+> 提取自旧库 git 历史（61 提交），已做隐私串扫描（零命中），提取时间 2026-10-17；旧库已删，历史完整存档于 backups/repo-mirror/
+
+- 3c50838 (2026-10-17) kernel-patches: regenerate 940- against true CI baseline (vanilla 6.18.52 + 458 generic + 163 airoha patches, zero rejects verified)
+- 96a360d (2026-10-17) kernel-patches: rename 201-06 to 940- (apply after ponwrt 930)
+- d9aca9b (2026-10-17) merge: 收编 faadd2 独有 08f6385（README 去双账号说明，与 838c651 重写重复，-X ours 保留重写版）
+- 49137c6 (2026-10-17) kernel-patches: 201-06 PPE bind failure diagnostics (runtime-switchable)
+- 2f99692 (2026-10-17) privacy(voice): sanitize baresip README (remove real IMS account)
+- a03dd71 (2026-10-16) docs: README 分享注意事项删除隐私条目（按用户要求）
+- 838c651 (2026-10-16) docs: README 重写——固件信息/改进清单/部署须知(含eth0挂死警告)/分享注意/项目结构/代码来源/鸣谢/版权声明；删除双账号镜像信息
+- 08f6385 (2026-10-16) Clarify sysupgrade image information in README
+- 72f94bf (2026-10-16) docs: README——固件变体说明 + 隐私审计声明 + 分享注意事项（无个人数据）
+- 69acde7 (2026-10-16) fix(pond): build-21 刷机实证两缺陷固化修复——pon-fix-version 标记自动生成 + 套件注入 chmod 兜底
+- b9f42af (2026-10-16) feat(ci): manifest 硬门禁——EN8811H 驱动/固件（两腿）+ luci-app-onu-migrate（onu 腿）+ ppp 2.5.1 版本防回退
+- f4f4efa (2026-10-16) fix(phy): EN8811H 驱动+固件显式 =y——官方种子 =m 只编译不进镜像（build-10/build-20 manifest 实证缺失），zn504/xg2010g 的 2.5G 口从未可用
+- 57c646e (2026-10-15) fix(config): build-17 秒挂定案——choice 互斥实证，profile 层禁选设备
+- 4dca96c (2026-10-15) fix(ci): ppp 固定步骤的 tar 路径硬编码致双腿 11 秒挂——改为探测归档根目录
+- 4324074 (2026-10-15) fix(build): build-16 验收定案——双设备真正修复（三层符号）+ ppp 固定 2.5.1 + 双设备硬门禁
+- 1d0d77e (2026-10-15) feat(pond): 补丁开关化——双二进制+UCI 选项+LuCI 可切，刷机免重复部署
+- 1ce7de5 (2026-10-15) fix(ppp): pond-watchdog 看门狗进叠加层——pppd 子脚本 segfault 的兜底
+- b52e45a (2026-10-15) fix(config): 修正 faf2a43 的 GBK 编码污染——两 frag 文件尾部中文注释改回 UTF-8
+- faf2a43 (2026-10-15) 双设备修复：片段显式关 CONFIG_TARGET_MULTI_PROFILE——ponwrt 种子开 multi-profile，与其并存的多设备符号会被吞到只剩一台（build-15 onu-suite 腿实证 gemtek_xg2010g-ubi 丢失、仅 zn504 出镜像）；关后进入显式设备列表模式，两台都编
+- 4591060 (2026-10-15) fix(pond): 补丁版 airoha-pond 进 files 叠加层，构建自动合入 rootfs（北京联通 10G EPON OAM 兼容）
+- d16cd7b (2026-10-15) build-15 验收后两修正：①Release 发布过滤 assets/*.tar.zst → assets/*（zip 打了但没挂到 Release，build-15 实证）②stock-frag 补双设备选择（stock 腿没吃 onu-frag，仍 24 台全编 318MB）
+- df38c8c (2026-10-15) fix(voice): AFE 节点补 resets = <&scuclk EN7581_I2S_RST>——201-04 刷入 build-14 后实测 probe -2 的根因
+- 7cac82c (2026-10-15) 设备选择改双设备保留（用户 10-15 拍板）：onu-frag 显式选 zn504 + gemtek_xg2010g-ubi（PonWrt 主线与 IWRT official-ported 生效，其余 22 台 anoki66 设备不再编译）；naoki66 腿去掉关 gemtek 的行，种子自带 xg2010g + 追加 zn504 双选，校验门禁同步加 xg2010g 必检。naoki66 瘦身任务按用户要求搁置
+- 962756c (2026-10-15) fix(easycwmp): TARGET_CFLAGS 加 -fcommon——gcc 10 起默认 -fno-common，上游把 event_code_array 定义在头文件被 9 个编译单元包含，run 38656190474 链接 multiple definition（配置、编译、链接三关全过后首次触到源码兼容层）
+- 95e2eb1 (2026-10-15) fix(easycwmp): 补丁去重 AM_INIT_AUTOMAKE——上游 configure.ac 第 2/5 行重复调用，老 autotools 容忍、automake 1.16 直接报 expanded multiple times（run 38618544071 首个可见的 autoreconf 真错误，此前被静默）
+- f7060f8 (2026-10-15) fix(easycwmp): Build/Prepare 显式 autoreconf -fi -v 替代失效的 PKG_FIXUP——run 38589353232 实证 automake 工程未产出 configure 且 Build/Configure/Default 对缺失 configure 静默跳过（no makefile found）；apt 补 pkg-config（pkg.m4，PKG_CHECK_MODULES 需要）
+- 76d33c1 (2026-10-14) fix(easycwmp): MAKE_FLAGS 赋值移到 include package.mk 之后——package-defaults.mk 在 package.mk 第 182 行（末尾）才 include，之前的 += 被 MAKE_FLAGS = 默认值整体覆盖（run 38576535281 三跑同症实锤）
+- e8e83b9 (2026-10-14) fix(easycwmp): BUILDROOT 补注 MAKE_INSTALL_FLAGS——ponwrt package-defaults.mk 实证 Build/Install/Default 只传 MAKE_INSTALL_FLAGS 不传 MAKE_FLAGS（run 38568491129 同一 /usr/lib 权限拒绝复发）
+- 4f9ede9 (2026-10-14) fix(easycwmp): libmicroxml Makefile 安装目标吃 BUILDROOT 而非 DESTDIR（run 38557167777 写 /usr/lib 权限拒绝），MAKE_FLAGS 注入 + InstallDev/install 改从 PKG_INSTALL_DIR 取；发布资产全 workflow 加 zip 双格式（Windows 资源管理器直开）
+- 3576f7b (2026-10-14) fix(easycwmp): 补 toolchain/install 段——run 38550724878 挂在 package/libs/toolchain stat libgcc_s.so.* 不存在（交叉工具链未装完即进包编译，与上一跑 host tools 竞态同层）
+- a9cc8e8 (2026-10-14) fix(easycwmp): 先 make tools/install 再编包——run 38539215092 挂在 host lua prepare 调 libdeflate-gzip 不存在（tools/libdeflate 未装，package/compile 直接进 host 包的已知竞态）
+- 699e850 (2026-10-14) 新增 easycwmp 备用包编译：feed-easycwmp（easycwmp 1.8.6 官方 OpenWrt Makefile 改用 GitHub 源 + 手写 libmicroxml Makefile + autoconf 2.70 兼容补丁）+ build-easycwmp.yml 只编 apk 不进固件；顺手修正 build.yml 设备校验 grep 前缀（CONFIG_TARGET_airoha_an7581_DEVICE_）并改硬失败
+- d845b2c (2026-10-14) iwrt-test run4 根因：naoki66 腿 zn504 设备符号写错前缀（CONFIG_TARGET_DEVICE_... 实为 CONFIG_TARGET_airoha_an7581_DEVICE_...），被 defconfig 静默丢弃后回退编译默认设备 gemtek_xg2010g-ubi（run 38517535582 仅产出 xg2010g 镜像）。修正符号名、显式关 gemtek choice 冲突，并把校验 grep 改为正确前缀 + zn504 必选的硬失败
+- 3227981 (2026-10-14) 201-03: SND_SOC_DAIFMT_CBS_CFS was removed in 6.18 (deprecated aliases dropped) -> CBC_CFC (codec=consumer, matches 'clock slave on the SLIC side' comment; v8 failed compile in an7581-le9643.c:65). A please review clocking intent
+- 1022cf3 (2026-10-14) Fix two more CI bugs: (1) voice SND_SOC_AN7581_LE9643 has no Kconfig default -> seed it via an7581/config-6.18 (kernel symbols never propagate from top .config; v7b syncconfig hung on interactive prompt, both legs); (2) naoki66 config: kconfig.pl double-merge silently ate all device symbols -> use naoki66's own cp seed + cat fragments + defconfig (run 38503535613 had 0 devices); also make verify greps non-fatal
+- 69da58d (2026-10-14) voice dts-patches step: use absolute patch path — git -C resolves relative paths inside ponwrt/, v7 failed with exit 128 in seconds
+- 9158a07 (2026-10-14) iwrt-test: sync suite injection with A's f50a168 rename (10 packages incl. mgmt/migrate); variant-aware feed cleanup (pon_userspace luci-app-pon vs onu_config luci-app-onu); widen verify grep
+- 50a0aeb (2026-10-14) iwrt-test: kconfig.pl only accepts binary expressions — naoki66 config merge must be two steps (3-file form dies with Parse error at run 38496905833)
+- 517d49f (2026-10-14) Close firmware gaps found in device-vs-firmware diff (report 20261014)
+- 076d6b4 (2026-10-14) Voice kernel patches rebuilt on upstream 200-02 (verified by git apply)
+- 1efab43 (2026-10-14) iwrt-test: copy ponwrt generic kernel patches too (IWRT generic/pending-6.18 671 conflicts with ponwrt airoha backports, run 38488123977); fix dtsi filename (an7581-znxt-zn50xg-d-common.dtsi); build.yml verify step also match *.apk
+- f5d4af3 (2026-10-14) Add build-iwrt-test.yml: dual-baseline ImmortalWrt test build (official-ported = IWRT master + ponwrt airoha port; naoki66 = naoki66 tree + ponwrt zn504 device blocks), suite injection optional, auto release iwrt-test-<run>
+- 9a00e46 (2026-10-14) build: fallback to single-threaded V=s on parallel failure to surface swallowed errors (v5 package/install failed silently); verify custom package symbols in final .config + built ipks after build
+- 8981278 (2026-10-13) probe: DUMP=1 test on failing vs working package
+- 2b09b21 (2026-10-13) probe: reproduce suite injection + dump package symbols in tmp/.config-package.in
+- 7975471 (2026-10-13) Fix frag symbol (luci-app-onu -> luci-app-pon per PKG_NAME); drop feed luci-app-pon symlink for suite variant; add resolved-config echo, image-dir inspection, empty-image hard fail
+- b7ae63b (2026-10-13) probe: dump tmp/.config-target.in generation state
+- 2092d64 (2026-10-13) Add probe-config workflow: dump resolved .config (target devices + custom packages) without full build
+- a50b71d (2026-10-13) Gate voice kernel-patches behind input (default off): v6 ASoC series conflicts with upstream ponwrt 200-02 AFE/I2S driver, broke target/linux in run 38351676620
+- e0bead1 (2026-10-13) docs: handoff note for voice kernel patch build verification (compile session)
+- b548ae1 (2026-10-13) Split image/packages assets; auto-release job; archive-run workflow for v1
+- e605149 (2026-10-13) Archive voice bring-up workspace: SLIC/AFE skeletons, baresip notes, reference patches
+- f18e079 (2026-10-13) Inject custom packages (speedcheck/netspeedtest/npu/defaults); select them in onu-frag
+- ccb9a5b (2026-10-13) Pack firmware images only, exclude packages repo from artifacts
+- 1aa2f42 (2026-10-13) Voice bring-up: ASoC AN7581 v6 series + an7581-le9643 machine + DTS patch, inject into kernel patches
+- bcc4552 (2026-10-13) Suite repo back to owner-based default (faadd2/luci-app-onu populated)
+- 3ca3d20 (2026-10-13) Default ONU suite repo to faadd22/luci-app-onu (public, no PAT needed)
+- e97f0ac (2026-10-13) Fix workflow expression: use format() instead of + concat
+- eb0c330 (2026-10-13) Fix workflow name YAML: quote scalar containing ': '
+- 686c4f3 (2026-10-12) Matrix build: onu-suite + stock variants
+- 9190fe3 (2026-10-12) Cloud build workflow for PonWrt an7581 + ONU suite

@@ -1,0 +1,51 @@
+From: voice-porting-project
+Subject: [PATCH] airoha: zn504xg-d: draft voice enablement (AFE + SLIC nodes)
+
+状态：草稿。spi1 节点标签在目标树中确认前不要直接应用；
+若 AN7581 无第二路硬件 SPI，改用 spi-gpio 位 bang（见 README）。
+
+--- a/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi
++++ b/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi
+@@ -xxx @@
+ 	led-phone {
+ 		label = "green:phone";
+ 		/* The active-low POTS hook LED is connected to GPIO24. */
+ 		gpios = <&en7581_pinctrl 24 GPIO_ACTIVE_LOW>;
+ 	};
++
++	/* Voice: Le9643 SLIC on second SPI + PCM via AFE */
++	sound-slic {
++		compatible = "airoha,an7581-slic-sound";
++		status = "okay";
++
++		audio-cpu = <&afe>;			/* AFE CPU DAI */
++		audio-codec = <&slic0>;			/* SPI control only; PCM is format-only */
++	};
+ };
+@@
+ &i2c0 {
+ 	status = "okay";
+@@
++/*
++ * TODO: verify spi1 exists on AN7581 and its pinmux against schematics.
++ * Fallback: spi-gpio on free GPIOs (CLK/MOSI/MISO/CS), Le9643 SPI is slow.
++ */
++&spi1 {
++	status = "okay";
++	pinctrl-names = "default";
++	/* pinctrl-0 = <&spi1_pins>; */
++	#address-cells = <1>;
++	#size-cells = <0>;
++
++	slic0: slic@0 {
++		compatible = "microsemi,le9643";
++		reg = <0>;
++		spi-max-frequency = <4000000>;
++		reset-gpios = <&en7581_pinctrl xx GPIO_ACTIVE_LOW>; /* TODO: probe */
++		int-gpios = <&en7581_pinctrl xx GPIO_ACTIVE_LOW>;   /* TODO: probe */
++	};
++};
++
++&afe {
++	status = "okay";
++};

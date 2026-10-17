@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+# pond-patch boot applier：开机按 UCI 选项对齐 airoha-pond 二进制。
+# 幂等（md5 已匹配则零操作），不影响正常启动路径。
+START=99
+STOP=10
+
+start() {
+    /usr/sbin/pond-patch-switch.sh
+}
+
+stop() {
+    :
+}

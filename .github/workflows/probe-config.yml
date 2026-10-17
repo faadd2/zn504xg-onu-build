@@ -1,0 +1,101 @@
+name: "Probe resolved .config (diagnostic)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      frag:
+        description: fragment config path in onu-build repo
+        required: true
+        default: config/onu-frag.config
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout PonWrt source
+        uses: actions/checkout@v6
+        with:
+          repository: huladabang/ponwrt
+          ref: master
+          path: ponwrt
+
+      - name: Checkout build config (this repo)
+        uses: actions/checkout@v6
+        with:
+          path: onu-build
+
+      - name: Checkout ONU suite (reproduce injection)
+        uses: actions/checkout@v6
+        with:
+          repository: faadd2/luci-app-onu
+          ref: main
+          path: onu-suite
+
+      - name: Inject suite packages (same as build.yml)
+        run: |
+          mkdir -p ponwrt/package
+          for p in onu-suite/luci-app-onu onu-suite/luci-app-onu-internet \
+                   onu-suite/luci-app-onu-iptv onu-suite/luci-app-onu-voice \
+                   onu-suite/luci-app-speedcheck onu-suite/luci-app-netspeedtest \
+                   onu-suite/luci-app-airoha-npu onu-suite/zn504xg-defaults; do
+            cp -r "$p" ponwrt/package/
+          done
+          ls ponwrt/package/
+
+      - name: Install feeds
+        working-directory: ponwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Remove feed luci-app-pon symlink (same as build.yml)
+        working-directory: ponwrt
+        run: |
+          rm -f package/feeds/pon_userspace/luci-app-pon
+          ls package/feeds/pon_userspace/ | grep -i "pon\|onu" || true
+
+      - name: Scan diagnostics
+        working-directory: ponwrt
+        run: |
+          rm -f tmp/.config-package.in tmpinfo
+          make prepare-tmpinfo || make tmp/.config-package.in || true
+          echo "===== symbols in tmp/.config-package.in ====="
+          for s in PACKAGE_luci-app-pon PACKAGE_luci-app-speedcheck PACKAGE_luci-app-netspeedtest PACKAGE_luci-app-airoha-npu PACKAGE_luci-app-onu-voice PACKAGE_zn504xg-defaults; do
+            printf "%s: " "$s"; grep -c "config $s\$" tmp/.config-package.in 2>/dev/null || echo 0
+          done
+          echo "===== DUMP test: speedcheck ====="
+          make -C package/luci-app-speedcheck DUMP=1 V=s 2>&1 | head -30
+          echo "exit=$?"
+          echo "===== DUMP test: zn504xg-defaults (control) ====="
+          make -C package/zn504xg-defaults DUMP=1 V=s 2>&1 | head -15
+          echo "exit=$?"
+      - name: Configure and dump resolved config
+        working-directory: ponwrt
+        run: |
+          ./scripts/kconfig.pl + \
+            configs/an7581.config \
+            "../onu-build/${{ inputs.frag }}" > .config
+          make defconfig
+          echo "===== TARGET selections ====="
+          grep -E "^CONFIG_TARGET_|^# CONFIG_TARGET" .config | grep -vE "ROOTFS|INITRAMFS|KERNEL|DEFAULT|OPTS|PART|BOARD|SUBTARGET|ARCH|PROFILE|PER_DEVICE|MULTI|OPTIONS|IMAGES" | head -40
+          echo "===== MULTI_PROFILE ====="
+          grep -E "CONFIG_TARGET_MULTI_PROFILE" .config
+          echo "===== custom packages ====="
+          grep -E "CONFIG_PACKAGE_(luci-app-onu|luci-app-pon|luci-app-speedcheck|luci-app-netspeedtest|luci-app-airoha-npu|zn504xg-defaults|curl)=" .config || echo "(none matched)"
+          echo "===== sound ====="
+          grep -E "CONFIG_(SND|SOUND)" .config | head -10
+          echo "===== tmpinfo state ====="
+          ls -la tmp/ 2>/dev/null | head -10
+          echo "--- .config-target.in device symbol count:"
+          grep -c "config TARGET_DEVICE" tmp/.config-target.in 2>/dev/null || echo "(file missing)"
+          echo "--- zn504xg in .config-target.in:"
+          grep -A2 "DEVICE_znxt_zn504xg" tmp/.config-target.in 2>/dev/null | head -8
+          echo "--- .config full symbol count: $(wc -l < .config)"
+          echo "--- TARGET_DEVICE lines in .config:"
+          grep -c "TARGET_DEVICE" .config || echo "NONE"

@@ -1,0 +1,26 @@
+#!/bin/sh
+# 99-pond-setup —— 首次开机一次性设置：
+#   1) pond-watchdog cron 兜底（pppd 子脚本崩溃时补报 netifd）
+#   2) pond-patch 开机自应用（补丁开关的启动钩子）
+#   3) 默认打开北京联通补丁（仅当用户未保存过该选项时写入）
+# 幂等，可安全重跑。
+
+# 1) watchdog cron
+CRON=/etc/crontabs/root
+grep -q pond-watchdog "$CRON" 2>/dev/null || echo '* * * * * /usr/sbin/pond-watchdog.sh' >> "$CRON"
+/etc/init.d/cron restart 2>/dev/null || true
+
+# 2) pond-patch 开机自应用
+if [ -x /etc/init.d/pond-patch ]; then
+    /etc/init.d/pond-patch enable 2>/dev/null
+    /etc/rc.d/S99pond-patch >/dev/null 2>&1 || ln -sf ../init.d/pond-patch /etc/rc.d/S99pond-patch 2>/dev/null || true
+fi
+
+# 3) 默认补丁开关（尊重已保存配置：刷机保留 /etc/config 时用户的选择不被覆盖）
+if ! uci -q get pon.general.epon_ctc_patch >/dev/null 2>&1; then
+    uci -q set pon.general='general'
+    uci -q set pon.general.epon_ctc_patch='1'
+    uci -q commit pon
+fi
+
+exit 0
