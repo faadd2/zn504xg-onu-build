@@ -1,0 +1,64 @@
+From: A-session root-cause analysis <local>
+Date: Sun, 18 Oct 2026 19:05:00 +0800
+Subject: [PATCH] clk: en7523: fix uninitialized val in reset update and add .reset op
+
+Root cause chain for the SLIC bring-up failure (-524) on ZN504XG-D:
+
+1. en7581_reset_ops only implements .assert/.deassert/.status, so
+   reset_control_reset() on the SLIC reset line returns -ENOTSUPP.
+   The en75xx ZSI voice driver's en75xx_zsi_slic_reset() propagates
+   that, aborting slic bring-up before chip detection ("bring-up
+   failed: -524").
+
+2. The 003-zsi-reset-assert-deassert-fallback works around (1), but
+   hits a second bug in en7523_reset_update(): `u32 val;` is
+   uninitialized and only ever OR-ed into. regmap_update_bits() only
+   applies bits inside the mask, so for the deassert case the target
+   bit is whatever stack garbage held: deassert randomly keeps the
+   reset asserted. On ZN504XG-D the garbage bit was set, the SLIC
+   stayed in reset, and chip-id reads returned 00 00 (-ENODEV).
+
+Fix both:
+
+- initialize val to 0 so deassert deterministically clears the bit;
+- add a .reset op (assert -> 20 ms -> deassert) so
+  reset_control_reset() works natively and the 003 fallback becomes
+  a harmless no-op path.
+
+Tested logic against the ZN504XG-D 6.18.52 tree; the .reset pulse
+matches the timing the legacy SCU path in en75xx_zsi_slic_reset()
+uses (5+5+20 ms -> 20 ms here is within spec).
+
+--- a/drivers/clk/clk-en7523.c
++++ b/drivers/clk/clk-en7523.c
+@@ -1029,7 +1029,7 @@
+ {
+ 	struct en_rst_data *rst_data = container_of(rcdev, struct en_rst_data, rcdev);
+ 	u32 addr = rst_data->bank_ofs[id / RST_NR_PER_BANK];
+-	u32 val;
++	u32 val = 0;
+ 
+ 	/* For PCIC reset logic is inverted, 0:assert 1:deassert*/
+ 	if (addr == REG_NP_SCU_PCIC)
+@@ -1083,7 +1083,21 @@
+ 	return rst_data->idx_map[reset_spec->args[0]];
+ }
+ 
++static int en7523_reset_reset(struct reset_controller_dev *rcdev,
++			      unsigned long id)
++{
++	int ret;
++
++	ret = en7523_reset_assert(rcdev, id);
++	if (ret)
++		return ret;
++	msleep(20);
++
++	return en7523_reset_deassert(rcdev, id);
++}
++
+ static const struct reset_control_ops en7581_reset_ops = {
++	.reset = en7523_reset_reset,
+ 	.assert = en7523_reset_assert,
+ 	.deassert = en7523_reset_deassert,
+ 	.status = en7523_reset_status,
