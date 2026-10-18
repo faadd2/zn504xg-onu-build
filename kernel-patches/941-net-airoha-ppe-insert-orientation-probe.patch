@@ -1,0 +1,145 @@
+net: airoha: PPE insert orientation probe (201-07 / 941)
+
+Follow-up to 940 (PPE bind=0 diagnostics).  The 940 first field test
+(build-26) showed the promotion chain breaks inside
+airoha_ppe_foe_insert_entry(): ~96% "no sw match" (software pending
+table compare failure), 4% state mismatch, zero commits, bind stays 0.
+
+Offline comparison against lotusmomo/airoha_sdk + mainline
+mediatek/mtk_ppe.c (report: airoha-sdk对拍报告-20107方向_20261017.md)
+narrowed the suspect set to:
+
+- compare_entry() memcmps only the 12-byte orig_tuple
+  (src_ip + dest_ip + ports), so a mismatch means tuple *content*,
+  not MAC/PPPoE metadata.
+- The bucket index is recomputed from the *hardware-learned* entry
+  tuple via airoha_ppe_foe_get_entry_hash(), and that hash function is
+  src/dst-asymmetric — a reversed tuple fails twice (wrong bucket +
+  wrong memcmp).
+- Leading hypothesis C1: on a PPPoE WAN the first RX packets the PPE
+  learns from are the *replies* (WAN->LAN), i.e. the hardware tuple is
+  the reverse of the software table's FLOW_ORIG tuple.  __mtk_ppe_check_skb
+  does not recompute the hash from the tuple (uses the descriptor hash),
+  which is why the MTK sibling does not hit this.
+
+This patch instruments only the compare-failure branch of
+airoha_ppe_foe_insert_entry() (depends on 940, must sort after it):
+
+1. Two-way tuple dump: "insert: mismatch sw=%pI4:%04x>%pI4:%04x
+   hw=%pI4:%04x>%pI4:%04x ib1=%08x" — ports printed as raw BE entry
+   words (no byte-order interpretation) so the log can be read side by
+   side with the SW table.  IPv4 ROUTE/HNAPT only; other type combos
+   get a counter line ("insert: mismatch non-ipv4 etype/htype").
+2. Reversed-match trial: on mismatch, swap src/dst ip + ports in a
+   stack copy of the hw entry and run compare_entry() again — a hit
+   prints "insert: REVERSED match" and proves/disproves C1 with zero
+   guessing.
+3. Bucket empty/non-empty split: "insert: bucket empty hash=%x
+   index=%u" fires when the software bucket held no candidate at all
+   (points at the replace-refusal path) vs the existing
+   "insert: no sw match" (bucket had entries but none matched —
+   direction/byte-order territory).  Also covers the 4% non-IPv4
+   suspects as countable lines.
+
+Diagnostic only — no functional change.  Same runtime switch as 940:
+  echo 0 > /sys/module/airoha_eth/parameters/ppe_dbg_enabled
+
+On-device verification (same discipline as 940: real TCP download,
+never ping):
+  dmesg | grep 20106
+Judgement keys:
+  "REVERSED match" present      -> C1 confirmed; fix = orientation-aware
+                                   lookup in insert (SW entry is
+                                   authoritative, commit overwrites the
+                                   whole 64B slot anyway).
+  mismatch dumps with equal-looking tuples -> byte-order/port-field
+                                   layout issue in the entry words.
+  "bucket empty" dominant       -> flows never reach the SW pending
+                                   table; back to replace-side gates.
+
+Generated against vanilla v6.18.52 + huladabang/ponwrt@c3b518b airoha
+series + 940 applied.  Applies after 940 (941 sorts right behind it).
+Validated: patch(940) -> git apply(941) forward and reverse, zero
+reject both directions.
+diff --git a/drivers/net/ethernet/airoha/airoha_ppe.c b/drivers/net/ethernet/airoha/airoha_ppe.c
+index b06eaae..3b2cdd0 100644
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -1086,6 +1086,7 @@ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
+ 	struct airoha_foe_bridge br = {};
+ 	struct airoha_foe_entry *hwe;
+ 	bool commit_done = false;
++	bool bucket_seen = false;
+ 	struct hlist_node *n;
+ 	u32 index, state;
+ 
+@@ -1120,8 +1121,54 @@ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
+ 			continue;
+ 		}
+ 
+-		if (!airoha_ppe_foe_compare_entry(e, hwe))
++		bucket_seen = true;
++		if (!airoha_ppe_foe_compare_entry(e, hwe)) {
++			/* 941: orientation probe —— C1 假设（RX 学习方向相反）
++			 * 双向元组原样 dump（ports 打条目内 BE 原值，不做字节序解释），
++			 * 再交换 src/dst 试算一次，命中即证实 C1。只处理 IPv4 类型
++			 * （本机 PPPoE WAN 场景），其余类型计数即可（顺手覆盖 4% 疑点）。
++			 */
++			int etype = FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE,
++					      e->data.ib1);
++			int htype = FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE,
++					      hwe->ib1);
++
++			if (etype == htype &&
++			    (etype == PPE_PKT_TYPE_IPV4_ROUTE ||
++			     etype == PPE_PKT_TYPE_IPV4_HNAPT)) {
++				struct airoha_foe_entry rev = *hwe;
++
++				ppe_dbg("insert: mismatch sw=%pI4:%04x>%pI4:%04x "
++					"hw=%pI4:%04x>%pI4:%04x ib1=%08x\n",
++					&e->data.ipv4.orig_tuple.src_ip,
++					e->data.ipv4.orig_tuple.ports >> 16,
++					&e->data.ipv4.orig_tuple.dest_ip,
++					e->data.ipv4.orig_tuple.ports & 0xffff,
++					&hwe->ipv4.orig_tuple.src_ip,
++					hwe->ipv4.orig_tuple.ports >> 16,
++					&hwe->ipv4.orig_tuple.dest_ip,
++					hwe->ipv4.orig_tuple.ports & 0xffff,
++					hwe->ib1);
++
++				rev.ipv4.orig_tuple.src_ip =
++					hwe->ipv4.orig_tuple.dest_ip;
++				rev.ipv4.orig_tuple.dest_ip =
++					hwe->ipv4.orig_tuple.src_ip;
++				rev.ipv4.orig_tuple.ports =
++					(hwe->ipv4.orig_tuple.ports << 16) |
++					(hwe->ipv4.orig_tuple.ports >> 16);
++
++				if (airoha_ppe_foe_compare_entry(e, &rev))
++					ppe_dbg("insert: REVERSED match "
++						"hash=%x index=%u ib1=%08x\n",
++						hash, index, hwe->ib1);
++			} else {
++				ppe_dbg("insert: mismatch non-ipv4 etype=%d "
++					"htype=%d ib1=%08x\n",
++					etype, htype, hwe->ib1);
++			}
+ 			continue;
++		}
+ 
+ 		airoha_ppe_foe_commit_entry(ppe, &e->data, hash, rx_wlan);
+ 		commit_done = true;
+@@ -1133,6 +1180,13 @@ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
+ 		goto unlock;
+ 	}
+ 
++	/* 941: 桶空（SW 表根本没这条流，指向 replace 拒绝路径）与
++	 * 桶有但比不中（方向/字节序，见 mismatch 日志）分离计数。
++	 */
++	if (!bucket_seen)
++		ppe_dbg("insert: bucket empty hash=%x index=%u\n",
++			hash, index);
++
+ l2_lookup:
+ 	airoha_ppe_foe_set_bridge_addrs(&br, eth_hdr(skb));
+ 	e = rhashtable_lookup_fast(&ppe->l2_flows, &br,

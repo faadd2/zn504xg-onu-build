@@ -16,8 +16,9 @@
 
 | 编号 | 主题 | 状态 |
 |---|---|---|
-| 940 | PPE bind 诊断插桩 v2（33 处锚点，20106-ppe: 前缀日志） | 现行（build-2 首编验证中） |
-| 941 | PPE insert 方向探针（sw-match orientation probe，B 侧命名） | 现行（B `1d19ea2`，待镜像本地） |
+| 940 | PPE bind 诊断插桩 v2（33 处锚点，20106-ppe: 前缀日志） | 现行（build-3 实机验证通过） |
+| 941 | PPE insert 方向探针（orientation probe：mismatch 双向 dump + REVERSED match 试算 + bucket empty 分离计数，B 侧 `1d19ea2` 产物） | 现行（build-3 已带，实机日志实证） |
+| 942 | PPE insert tuple 审计（20107: add/hw 双向 dump，补 941 的桶空盲区；上下文与 941 不相交，quilt 940→941→942 顺序应用双路验证通过） | 现行（待 build-4 编译实机） |
 | ~~201-01~~ | ~~AFE dt-binding~~ | 已移出（10-17 Path A 清理） |
 | ~~201-02~~ | ~~wm8960 dt-binding~~ | 已移出（同上） |
 | ~~201-03~~ | ~~le9643 machine 驱动~~ | 已移出（同上；build.yml 的 SND_SOC 四行同步删除） |
