@@ -1,0 +1,62 @@
+net: airoha: PPE insert-path hw/sw tuple audit (201-07 stage-2 / 942)
+
+Companion to 941 (B's insert-orientation-probe, which covers the
+bucket-nonempty compare-failure branch: sw/hw mismatch dump + reversed
+match test). 942 fills the two blind spots 941 leaves:
+
+1. bucket-EMPTY case (the dominant one in the build-3 field test:
+   ~165 "no sw match" vs 14 state lines): 941 prints only hash/index,
+   never the hardware-learned tuple. Add a dump of the hw entry's
+   orig_tuple + recomputed bucket index right after the hash
+   recomputation in airoha_ppe_foe_insert_entry, so we see what the
+   PPE actually learned from RX packets even when no software entry
+   shares the bucket.
+2. software side at install time: airoha_ppe_foe_flow_commit_entry
+   dumps the tuple exactly as the flow offload stored it (hash, type,
+   udp flag, orig_tuple).
+
+Join 942's "add" and "hw" lines by tuple value. If they differ only
+by src/dst reversal -> C1 confirmed by 941's REVERSED match path; if
+they differ in ports (incl. the 0xa5a5a5 _pad bytes for ROUTE
+entries) or udp flag, that field is the fix target. Same ppe_dbg
+ratelimited switch as 940/941 (ppe_dbg_enabled, default on).
+
+Context is disjoint from 941's hunks by construction; quilt order
+940 -> 941 -> 942 applies cleanly in either presence of 941.
+
+Signed-off-by: ZN504XG-D PPE debugging project
+--- a/drivers/net/ethernet/airoha/airoha_ppe.c
++++ b/drivers/net/ethernet/airoha/airoha_ppe.c
+@@ -1110,6 +1110,17 @@ static void airoha_ppe_foe_insert_entry(struct airoha_ppe *ppe,
+ 	index = airoha_ppe_foe_get_entry_hash(ppe, hwe);
+ 	ppe_dbg("insert: state=%u index=%u hash=%x rx_wlan=%d\n",
+ 		state, index, hash, rx_wlan);
++	if (FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, hwe->ib1) !=
++	    PPE_PKT_TYPE_BRIDGE &&
++	    FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, hwe->ib1) <=
++	    PPE_PKT_TYPE_IPV4_DSLITE)
++		ppe_dbg("20107: hw hash=%x type=%u udp=%u state=%u orig=%08x>%08x ports=%08x\n",
++			hash,
++			FIELD_GET(AIROHA_FOE_IB1_BIND_PACKET_TYPE, hwe->ib1),
++			!!(hwe->ib1 & AIROHA_FOE_IB1_BIND_UDP), state,
++			hwe->ipv4.orig_tuple.src_ip,
++			hwe->ipv4.orig_tuple.dest_ip,
++			hwe->ipv4.orig_tuple.ports);
+ 	hlist_for_each_entry_safe(e, n, &ppe->foe_flow[index], list) {
+ 		if (e->type == FLOW_TYPE_L2_SUBFLOW) {
+ 			state = FIELD_GET(AIROHA_FOE_IB1_BIND_STATE, hwe->ib1);
+@@ -1180,6 +1191,14 @@ static int airoha_ppe_foe_flow_commit_entry(struct airoha_ppe *ppe,
+ 	e->type = FLOW_TYPE_L4;
+ 	e->hash = 0xffff;
+ 
++	if (type != PPE_PKT_TYPE_BRIDGE &&
++	    type <= PPE_PKT_TYPE_IPV4_DSLITE)
++		ppe_dbg("20107: add hash=%x type=%u udp=%u orig=%08x>%08x ports=%08x\n",
++			hash, type, !!(e->data.ib1 & AIROHA_FOE_IB1_BIND_UDP),
++			e->data.ipv4.orig_tuple.src_ip,
++			e->data.ipv4.orig_tuple.dest_ip,
++			e->data.ipv4.orig_tuple.ports);
++
+ 	spin_lock_bh(&ppe_lock);
+ 	hlist_add_head(&e->list, &ppe->foe_flow[hash]);
+ 	spin_unlock_bh(&ppe_lock);
