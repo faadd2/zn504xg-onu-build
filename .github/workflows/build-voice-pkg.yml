@@ -123,52 +123,34 @@ jobs:
       # 静默空转（exit 0、零输出）——改走 install（强制全做）。
       # 三轮实证（run 39038935708）：并行 kernel 编译失败时错误被吞，
       # 必须 -j1 V=s 重试兜底（与包编译步同策略）。
+      # ===== 十三轮（10-18）源码级复盘：上面两轮结论都是误诊 =====
+      # kernel-build.mk 真实链：install 只依赖 $(LINUX_DIR)/.image
+      # （Kernel/CompileImage=bzImage/Image + dtb），与 .modules 平行；
+      # image install 又被 IMAGE_INSTALL_STAMP 状态缓存把守
+      # （state 一致且无非目标文件就直接跳过）。单包 workflow 的目标只是
+      # Module.symvers（= .modules 的副产物），它从来不该走 install——
+      # 二轮「compile 静默空转」、九轮「清空 IMAGES install 无事可做」、
+      # 10~12 轮三连 Module.symvers 缺失，全部是**同一陷阱的不同侧面**：
+      # make rc=0 但关键目标从未运行，V=s 兜底只在 make 失败时触发、永不触发。
+      # 纪律（easycwmp 老教训）：**不能只盯退出码，必须显式校验产物**。
+      # 另：九~十二轮起在编译前放的 `exit 0` apk 存根会让 install 永远空转，
+      # 本轮起删除（已改显式 compile+install 双目标）。
       - name: Build kernel
         working-directory: ponwrt
         run: |
-          # 五轮（39043618565）实证：KERNEL_INITRAMFS 机制使内核镜像构建
-          # 需要 rootfs 目录（gen_initramfs.sh: Cannot open root-airoha）；
-          # 六轮（39048766106）实证：initramfs 链还要 root.orig 快照；
-          # 七轮（39055058714）再实证：清空 KERNEL_INITRAMFS 后
-          # sysupgrade.itb 的 ROOTFS 依赖（image.mk:781）仍拉起
-          # per-device target-dir（image.mk:411），它要
-          # root.orig-$(BOARD) 快照——而该快照由顶层 package/install
-          # 链生成（package/Makefile:151），单包 workflow 永远不会有。
-          # 本步只要 modules/Module.symvers，不要任何固件镜像，双管齐下：
-          # ① 清空 KERNEL_INITRAMFS（含 image/Makefile 的 Device/Default）
-          #    与全部设备的 IMAGES → 不触发 target-dir/rootfs 镜像链；
-          # ② Manifest 步（image.mk:1034 install 目标无条件执行，
-          #    apk list --manifest 要读 root.orig 的 apk 数据库）——
-          #    手工建 root.orig-airoha 并 apk --initdb 空库兜住。
-          # 九轮（39070772691）再再再实证：清空 IMAGES 是馊主意——镜像目标
-          # 全消失后 install 无事可做，Image/BuildKernel 随之一并不跑，
-          # make rc=0 但内核零编译（Module.symvers 缺失硬校验拦下）。
-          # 正确姿势=保留 IMAGES（kernel Image/dtb 由镜像链顺带产出），
-          # 只清 KERNEL_INITRAMFS（recovery 链），target-dir 的 `apk add
-          # <设备包>`（image.mk:413 无 '-' 前缀硬失败）与 Manifest 的
-          # `apk list --manifest` 全靠 exit 0 的 apk 存根空转通过；
-          # 00-dummy.post-install 种子防 prepare_rootfs 的 glob 落空。
-          sed -ri '/^[[:space:]]*KERNEL_INITRAMFS([[:space:]]*):?=[[:space:]]*kernel-bin/,+1d' \
-              target/linux/airoha/image/Makefile target/linux/airoha/image/*.mk
-          grep -rn "KERNEL_INITRAMFS[[:space:]]*:?=[[:space:]]*kernel-bin" \
-              target/linux/airoha/image/ || echo "KERNEL_INITRAMFS 已全清空"
-          tdir=$(ls -d build_dir/target-*/ | head -1)
-          echo "target dir: $tdir"
-          mkdir -p "${tdir}root-airoha"
-          mkdir -p "${tdir}root.orig-airoha/lib/apk/db"
-          printf '#!/bin/sh\nexit 0\n' > staging_dir/host/bin/apk
-          chmod +x staging_dir/host/bin/apk
-          printf '#!/bin/sh\nexit 0\n' > "${tdir}root.orig-airoha/lib/apk/db/00-dummy.post-install"
-          chmod +x "${tdir}root.orig-airoha/lib/apk/db/00-dummy.post-install"
-          make target/linux/install -j"$(nproc)" || {
-            echo "::warning::parallel kernel build failed — retrying single-threaded V=s"
-            make target/linux/install -j1 V=s
+          # 显式跑 .modules（Kernel/CompileModules → Module.symvers）
+          make target/linux/compile -j"$(nproc)" || {
+            echo "::warning::parallel kernel compile failed — retrying single-threaded V=s"
+            make target/linux/compile -j1 V=s
           }
           kdir=$(ls -d build_dir/target-*/linux-*/linux-* 2>/dev/null | head -1)
           [ -n "$kdir" ] || kdir=$(ls -d build_dir/target-*/linux-* 2>/dev/null | head -1)
           echo "kernel dir: $kdir"
           ls "$kdir" | head -5
-          [ -n "$kdir" ] && [ -f "$kdir/Module.symvers" ] || { echo "::error:: kernel tree not prepared (Module.symvers missing)"; exit 1; }
+          [ -n "$kdir" ] && [ -f "$kdir/Module.symvers" ] || { echo "::error:: kernel modules missing (Module.symvers not found after target/linux/compile)"; exit 1; }
+          # 不再跑 image install：kmod 包只需要 prepare+configure+modules 的内核树
+          # （Module.symvers/.config 已显式校验），Image/dtb/镜像对单包编译零价值，
+          # 且 install 链带 initramfs/rootfs/apk 数据库一堆单包场景不该碰的依赖。
 
       - name: Build en75xx-voip packages
         working-directory: ponwrt
