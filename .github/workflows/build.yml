@@ -278,8 +278,8 @@ jobs:
       # manifest 硬门禁（A 10-16 要求）：教训=缺包只在刷机后才暴露，必须在打包前拦。
       # EN8811H 驱动+固件=两腿都要（2.5G 口）；migrate=仅 onu-suite 腿；ppp 版本防回退；
       # openssh-sftp-server=两腿都要（sftp 传固件/抓包，A 10-17 要求）；
-      # 语音 kmod 三件套=voice=yes 时必查（Path B：en75xx-voip feed 包的
-      # lec/pcm/slic-le9642，2026-10-17 起替代 Path A 的 kmod-sound 系列）。
+      # 语音 kmod 三件套=voice=yes 且 onu-suite 腿必查（stock 腿纯净无语音，
+      # 10-18 方案A 起腿级条件，曾 run 级误伤 stock 致 build-3 挂门禁）。
       - name: Manifest hard gate
         working-directory: ponwrt/bin/targets/airoha/an7581
         run: |
@@ -293,7 +293,11 @@ jobs:
           if [ "${{ matrix.inject_suite }}" = "yes" ]; then
             grep -hq "^luci-app-onu-migrate - " "${mans[@]}" || { echo "::error:: luci-app-onu-migrate missing from manifest!"; exit 1; }
           fi
-          if [ "${{ inputs.voice_kernel_patches }}" = "yes" ]; then
+          # 语音 kmod 三件套=voice=yes 且 onu-suite 腿才查（10-18 方案A：
+          # 三包只被选入 onu-frag，stock 纯净腿没有也永不会有，run 级
+          # 条件误伤 stock 腿致 build-3 三度挂门禁——stock=纯净对比基线
+          # 是用户既定范围，语音能力归 onu-suite 腿）。
+          if [ "${{ inputs.voice_kernel_patches }}" = "yes" ] && [ "${{ matrix.inject_suite }}" = "yes" ]; then
             for pkg in kmod-en75xx-lec kmod-en75xx-pcm kmod-en75xx-slic-le9642; do
               grep -h "^$pkg - " "${mans[@]}" | sort -u || true
               grep -hq "^$pkg - " "${mans[@]}" || { echo "::error:: voice build missing $pkg from manifest!"; exit 1; }
