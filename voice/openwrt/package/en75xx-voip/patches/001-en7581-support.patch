@@ -1,0 +1,60 @@
+diff --git a/src/en75xx_pcm.c b/src/en75xx_pcm.c
+index 5288bc5..9b30798 100644
+--- a/src/en75xx_pcm.c
++++ b/src/en75xx_pcm.c
+@@ -1433,10 +1433,23 @@ static const struct en75xx_pcm_soc_data en7523_pcm_data = {
+ 	.pcm_v2 = true,
+ };
+ 
++static const struct en75xx_pcm_soc_data en7581_pcm_data = {
++	.name = "EN7581",
++	.ring_count = EN75XX_PCM_RING_COUNT,
++	.desc_size = sizeof(struct en75xx_pcm_desc_v2),
++	.ring_cfg = 0x3f,
++	.dma_mask = DMA_BIT_MASK(32),
++	.dma_addr_mask = 0x3fffffff,
++	.dma_or = 0x80000000,
++	.channel_mask = GENMASK(3, 0),
++	.pcm_v2 = true,
++};
++
+ static const struct of_device_id en75xx_pcm_of_match[] = {
+ 	{ .compatible = "econet,en751221-pcm", .data = &en751221_pcm_data },
+ 	{ .compatible = "econet,en7528-pcm", .data = &en7528_pcm_data },
+ 	{ .compatible = "airoha,en7523-pcm", .data = &en7523_pcm_data },
++	{ .compatible = "airoha,en7581-pcm", .data = &en7581_pcm_data },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, en75xx_pcm_of_match);
+@@ -1451,5 +1464,5 @@ static struct platform_driver en75xx_pcm_driver = {
+ };
+ module_platform_driver(en75xx_pcm_driver);
+ 
+-MODULE_DESCRIPTION("EcoNet/Airoha EN751221/EN7528/EN7523 PCM/TDM driver");
++MODULE_DESCRIPTION("EcoNet/Airoha EN751221/EN7528/EN7523/EN7581 PCM/TDM driver");
+ MODULE_LICENSE("GPL");
+diff --git a/src/en75xx_slic_le9642.c b/src/en75xx_slic_le9642.c
+index 35bfe5b..07cf14f 100644
+--- a/src/en75xx_slic_le9642.c
++++ b/src/en75xx_slic_le9642.c
+@@ -888,6 +888,8 @@ static const struct of_device_id le9642_of_match[] = {
+ 	{ .compatible = "microsemi,le9642" },
+ 	{ .compatible = "microsemi,le9641" },
+ 	{ .compatible = "microchip,le9642" },
++	{ .compatible = "microsemi,le9643" },
++	{ .compatible = "microchip,le9643" },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, le9642_of_match);
+diff --git a/src/en75xx_zsi.c b/src/en75xx_zsi.c
+index 8e55a27..ed0754b 100644
+--- a/src/en75xx_zsi.c
++++ b/src/en75xx_zsi.c
+@@ -495,6 +495,7 @@ static const struct of_device_id en75xx_zsi_of_match[] = {
+ 	{ .compatible = "econet,en7528-zsi" },
+ 	{ .compatible = "airoha,en7523-zsi" },
+ 	{ .compatible = "econet,en75xx-zsi" },
++	{ .compatible = "airoha,en7581-zsi" },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(of, en75xx_zsi_of_match);
