@@ -1,0 +1,35 @@
+diff --git a/src/en75xx_zsi.c b/src/en75xx_zsi.c
+index ed0754b..386dc48 100644
+--- a/src/en75xx_zsi.c
++++ b/src/en75xx_zsi.c
+@@ -232,9 +232,29 @@ int en75xx_zsi_slic_reset(struct en75xx_zsi *zsi)
+ 
+ 	if (zsi->rst) {
+ 		ret = reset_control_reset(zsi->rst);
+-		if (ret)
++		if (ret == -ENOTSUPP) {
++			/*
++			 * Some reset controllers (e.g. the Airoha SCU
++			 * provider) only implement assert/deassert and
++			 * leave .reset NULL, so reset_control_reset()
++			 * fails with -ENOTSUPP. Emulate the pulse the
++			 * legacy SCU path below performs.
++			 */
++			ret = reset_control_assert(zsi->rst);
++			if (ret)
++				return ret;
++			usleep_range(5000, 6000);
++			ret = reset_control_deassert(zsi->rst);
++			if (ret)
++				return ret;
++		} else if (ret) {
+ 			return ret;
++		}
+ 		usleep_range(20000, 25000);
++
++		/* the reset drops the wrapper enable, put it back */
++		writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL,
++		       zsi->base + ZSI_EN);
+ 		return 0;
+ 	}
+ 
