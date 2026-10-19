@@ -182,21 +182,6 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # telephony feed 的 baresip 自带 /etc/init.d/baresip（读 UCI baresip 段跑
-      # /etc/baresip，与 onu.ims 架构不兼容=服务空转）；luci-app-onu-voice 自带
-      # 定制 init 脚本，二者同路径冲突会在 rootfs 组装时报 apk overwrite ERROR
-      # （build-7 实证）。剥掉 feed 的 init 安装行，让定制版成为唯一 init 脚本。
-      - name: Strip stock baresip init.d (custom init ships with luci-app-onu-voice)
-        if: matrix.inject_suite == 'yes'
-        working-directory: ponwrt
-        run: |
-          f=feeds/telephony/net/baresip/Makefile
-          [ -f "$f" ] || { echo "::error:: $f not found"; exit 1; }
-          sed -i '/baresip\.init/d' "$f"
-          if grep -q 'baresip\.init' "$f"; then echo "::error:: strip failed: baresip.init still referenced"; exit 1; fi
-          grep -q 'Package/baresip' "$f" || { echo "::error:: $f sanity check failed (wrong file?)"; exit 1; }
-          echo "stripped stock init.d from feed baresip"
-
       # 增强版 fork（package/luci-app-onu，PKG_NAME=luci-app-pon）与 pon_userspace feed
       # 的 luci-app-pon 同名；feed 后扫描会覆盖 package/ 下的定义，导致增强版被静默忽略。
       # 移除 feed 符号链接，让增强版成为唯一定义（仅 onu-suite 变体）。
