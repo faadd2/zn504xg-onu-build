@@ -1,0 +1,52 @@
+ZN504XG-D voice: allow overriding the PCM bus slot at module load.
+
+The FXS SLIC on ZN504XG-D never answers on the ZSI bus (chip id
+reads back 00 00).  The slot number is the last runtime-untestable
+variable: it only comes from the device tree, so probing slot 0..7
+meant rebuilding the image for every value.
+
+Add a "bus_slot" module parameter (default -1 = keep the device
+tree value).  Loading en75xx_slic_le9642 with bus_slot=N and
+rebinding 1fbd1000.zsi:slic@0 scans a slot without a reflash:
+
+  rmmod en75xx_slic_le9642
+  insmod en75xx_slic_le9642.ko bus_slot=4
+  echo 1fbd1000.zsi:slic@0 > .../en75xx-slic-le9642/bind
+  dmesg | grep -E "chip id|detected"
+
+A hit prints "Le964x detected" instead of "unexpected chip id 00 00".
+
+Signed-off-by: ZN504XG-D voice porting project
+diff --git a/src/en75xx_slic_le9642.c b/src/en75xx_slic_le9642.c
+index 1111111..2222222 100644
+--- a/src/en75xx_slic_le9642.c
++++ b/src/en75xx_slic_le9642.c
+@@ -298,6 +298,17 @@ static bool tx_msb;
+ module_param(tx_msb, bool, 0644);
+ MODULE_PARM_DESC(tx_msb, "place the playback G.711 code in the slot MSB");
+ 
++/*
++ * Board bring-up helper: some boards wire the SLIC to an unknown PCM
++ * bus slot, and the device tree value can only be changed with a
++ * rebuild.  -1 keeps the device tree value; 0..LE9642_MAX_SLOT
++ * overrides airoha,bus-slots[0] so a slot can be scanned at runtime
++ * by reloading this module and rebinding the slic device.
++ */
++static int bus_slot = -1;
++module_param(bus_slot, int, 0644);
++MODULE_PARM_DESC(bus_slot, "override airoha,bus-slots[0] (-1 = device tree, 0..31 = override)");
++
+ /* ------------------------------------------------------------------ */
+ /* MPI helpers                                                         */
+ /* ------------------------------------------------------------------ */
+@@ -840,3 +852,8 @@ static int le9642_probe(struct platform_device *pdev)
+ 	of_property_read_u32(np, "airoha,lines", &n_lines);
+ 	of_property_read_u32_array(np, "airoha,bus-slots", slots, 2);
++	if (bus_slot >= 0 && bus_slot <= LE9642_MAX_SLOT) {
++		dev_info(dev, "bus_slot override: %u (device tree said %u)\n",
++			 bus_slot, slots[0]);
++		slots[0] = bus_slot;
++	}
+ 	if (of_property_read_bool(np, "airoha,a-law"))
+ 		slic->codec = EN75XX_PCM_CODEC_ALAW;
+ 	/*
