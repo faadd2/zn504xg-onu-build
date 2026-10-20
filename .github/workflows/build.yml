@@ -90,6 +90,20 @@ jobs:
           cp -r /tmp/ow24/ppp ponwrt/package/network/services/ppp
           grep -E "PKG_VERSION|PKG_RELEASE" ponwrt/package/network/services/ppp/Makefile | head -3
 
+      # libffi 回补：immortalwrt/packages feed 2026-10-19 同步上游
+      # 「libffi: move to core repo」(70ac3a84) 后，feed 内 python3 的
+      # libffi 依赖悬空——ponwrt 基线 c3b518b 核内无 package/libs/libffi，
+      # Configure 步报 "dependency on 'libffi', which does not exist"，
+      # python3 编译死于 ffi.h 缺失（build-9 双腿 2026-10-20 实证）。
+      # 修复=按上游移动目标，从 openwrt core 取回 package/libs/libffi
+      # （目录仅一个 Makefile，raw 单文件取回即可；SHA 钉死防漂移）。
+      - name: Restore libffi to core (packages feed moved it out)
+        run: |
+          mkdir -p ponwrt/package/libs/libffi
+          curl -fsSL -o ponwrt/package/libs/libffi/Makefile \
+            https://raw.githubusercontent.com/openwrt/openwrt/6985585f0a6bc48cfbab2de5e5e0ef3f27504b00/package/libs/libffi/Makefile
+          grep -E "PKG_VERSION|PKG_RELEASE" ponwrt/package/libs/libffi/Makefile | head -3
+
       - name: Checkout ONU suite
         if: matrix.inject_suite == 'yes'
         uses: actions/checkout@v6
