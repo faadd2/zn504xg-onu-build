@@ -1,0 +1,229 @@
+AN7581: complete the OEM spi.ko transaction layer in en75xx_zsi (006).
+
+Follow-up to 005 (build-9/11: the static interface-mode write and the
+SLIC0 reset pulse moved the signature from 0x00 to 0xff, but the
+Le9642/43 still never answers).  Capstone disassembly of the stock
+spi.ko (ZSI_bytes_write @0x3400, ZSI_bytes_read @0x32c0, SPI_cfg @0x2e0,
+SPI_Reset @0x1f50; report:
+devices/ZN504XG-D/reports/a1_spi_ko_diff_report_20261021.md) shows the
+OEM driver does three more things our driver never did:
+
+  - Writes the wrapper chip-select register (PA 0x1fbd1014 = cs) before
+    EVERY ZSI transaction on HIR 0xE/0xC.  Our driver has no 0x14 write
+    at all; with no chip selected the transaction lands nowhere and the
+    bus floats high - the exact 0xff ff signature observed on the 504.
+  - Pokes the wrapper control register (0x00) before every transaction:
+    (v & 0xe0ffffef) | 0xf0000010.  Idempotent; converges to
+    0xf0030313, i.e. the OEM steady-state top byte is 0xf0 whereas the
+    init value programmed once is 0x0f030313.
+  - SPI_Reset runs the interface mode as a reset dance (0x1fb00094 low
+    nibble 0 -> f -> 5 with delays) and pulses 0x1fb00834 bit 4 around
+    the SLIC0 pulse on HIR 0xC/0xE, instead of a single static write.
+
+Changes (all in en75xx_zsi.c, non-legacy AN7581 path only):
+
+  - New wrapper register defines ZSI_CS_SEL (0x14) and the per-tx poke
+    masks ZSI_TX_PREP_KEEP / ZSI_TX_PREP_SET.
+  - zsi_prep_transaction_locked(): CS write + control-reg poke, called
+    under the tx mutex from en75xx_zsi_write/read_reg/write_reg.
+  - en75xx_zsi_slic_reset(): OEM mode dance before the SLIC0 pulse and
+    a SYS_RESET bit4 pulse after it, with OEM delay values.
+  - Three module params defaulting to OEM behaviour for blind A/B from
+    /etc/modules.d: zsi_cs (0x14 value, 0xff = never write),
+    tx_prep, reset_mode_dance.  DT property airoha,zsi-cs overrides
+    zsi_cs.
+  - Probe banner prints cs/tx_prep/mode_dance so the debug build proves
+    which path ran.
+
+Acceptance (build-13, same byte-level gate as build-11): dmesg shows
+"Le964%c detected (rcn 08 pcn ..)" instead of "unexpected chip id ff ff",
+and the FXS character device appears.
+
+Signed-off-by: ZN504XG-D voice porting project
+--- a/src/en75xx_zsi.c
++++ b/src/en75xx_zsi.c
+@@ -51,6 +51,18 @@
+ #define ZSI_CFG_VAL			0x0f030313u	/* OEM stock value */
+ #define ZSI_EN_VAL			0x19
+ 
++/* Wrapper chip-select register: the OEM spi.ko writes the target cs
++ * before every transaction on HIR 0xE/0xC (ZSI_bytes_write/read). */
++#define ZSI_CS_SEL			0x014
++
++/* OEM per-transaction poke of the wrapper control register (reg 0x00):
++ * keep everything in KEEP, force the bits in SET.  After the first
++ * transaction the register converges to 0xf0030313 (the poke is
++ * idempotent), i.e. the OEM steady-state top byte is 0xf0, not the
++ * 0x0f programmed once at init. */
++#define ZSI_TX_PREP_KEEP		0xe0ffffefu
++#define ZSI_TX_PREP_SET		0xf0000010u
++
+ /* SYS block (0x1fb00000) */
+ #define SYS_IFACE_MODE			0x094
+ #define  SYS_IFACE_MODE_MASK		GENMASK(3, 0)
+@@ -58,6 +70,9 @@
+ #define SYS_RESET			0x834
+ #define  SYS_RESET_SLIC0		BIT(0)
+ /* Bit 25 is SFC2/PCM reset, not a ZSI/SLIC reset. */
++/* OEM SPI_Reset (HIR 0xC/0xE) additionally pulses bit 4 around the
++ * SLIC0 pulse; purpose undocumented, mirrored for fidelity. */
++#define  SYS_RESET_ZSI_BIT4		BIT(4)
+ 
+ /* Chip SCU block (0x1fa20000) */
+ #define SCU_IOMUX_CONTROL1		0x104
+@@ -94,6 +109,9 @@
+ 	struct mutex		lock;
+ 	struct list_head	node;
+ 	unsigned int		gap_us;
++	u8			cs;		/* 0x14 value per tx; 0xff = never write */
++	bool			tx_prep;	/* per-tx control-reg poke */
++	bool			reset_mode_dance; /* SYS_IFACE_MODE 0->f->5 dance */
+ 	bool			hw_ready;
+ };
+ 
+@@ -106,6 +124,31 @@
+ 	"inter-byte gap in us (default 5000; below ~2000 the SLIC mis-parses "
+ 	"profile streams)");
+ 
++/*
++ * 006: OEM transaction-layer plumbing (reverse-engineered from spi.ko
++ * ZSI_bytes_write/read @0x3400/0x32c0, report
++ * devices/ZN504XG-D/reports/a1_spi_ko_diff_report_20261021.md).
++ * All three default to the OEM behaviour and can be disabled from
++ * /etc/modules.d for blind A/B on the 504.
++ */
++static unsigned int zsi_cs = 0;
++module_param(zsi_cs, uint, 0644);
++MODULE_PARM_DESC(zsi_cs,
++	"chip-select value written to wrapper reg 0x14 before every "
++	"transaction (OEM: cs of the SLIC); 0xff disables the write");
++
++static bool zsi_tx_prep = true;
++module_param_named(tx_prep, zsi_tx_prep, bool, 0644);
++MODULE_PARM_DESC(zsi_tx_prep,
++	"poke wrapper control reg 0x00 before every transaction: "
++	"(v & 0xe0ffffef) | 0xf0000010 (default true)");
++
++static bool zsi_reset_mode_dance = true;
++module_param_named(reset_mode_dance, zsi_reset_mode_dance, bool, 0644);
++MODULE_PARM_DESC(zsi_reset_mode_dance,
++	"OEM SPI_Reset mode dance on SYS_IFACE_MODE: 0 -> f -> ZSI with "
++	"delays, plus a SYS_RESET bit4 pulse (default true)");
++
+ /* ------------------------------------------------------------------ */
+ /* Byte level                                                          */
+ /* ------------------------------------------------------------------ */
+@@ -157,6 +200,24 @@
+ 	return 0;
+ }
+ 
++/*
++ * OEM transaction preamble (spi.ko ZSI_bytes_write/read): program the
++ * chip-select register and poke the control register before the wrapper
++ * starts moving bytes.  Must be called with zsi->lock held.
++ */
++static void zsi_prep_transaction_locked(struct en75xx_zsi *zsi)
++{
++	if (zsi->cs != 0xff)
++		writel(zsi->cs, zsi->base + ZSI_CS_SEL);
++
++	if (zsi->tx_prep) {
++		u32 v = readl(zsi->base + ZSI_CFG);
++
++		writel((v & ZSI_TX_PREP_KEEP) | ZSI_TX_PREP_SET,
++		       zsi->base + ZSI_CFG);
++	}
++}
++
+ /* ------------------------------------------------------------------ */
+ /* Hardware bring-up                                                   */
+ /* ------------------------------------------------------------------ */
+@@ -282,12 +343,37 @@
+ 	 */
+ 	if (!zsi->legacy_scu) {
+ 		if (!IS_ERR_OR_NULL(zsi->scu_map)) {
++			if (zsi->reset_mode_dance) {
++				/*
++				 * OEM SPI_Reset programs the interface mode as a
++				 * reset dance, not a static write: low nibble
++				 * 0 -> f -> ZSI with delays in between.
++				 */
++				regmap_update_bits(zsi->scu_map, SYS_IFACE_MODE,
++						   SYS_IFACE_MODE_MASK, 0);
++				msleep(5);
++				regmap_update_bits(zsi->scu_map, SYS_IFACE_MODE,
++						   SYS_IFACE_MODE_MASK, 0xf);
++				msleep(5);
++				regmap_update_bits(zsi->scu_map, SYS_IFACE_MODE,
++						   SYS_IFACE_MODE_MASK,
++						   SYS_IFACE_MODE_ZSI);
++				msleep(5);
++			}
+ 			regmap_update_bits(zsi->scu_map, SYS_RESET,
+ 					   SYS_RESET_SLIC0, SYS_RESET_SLIC0);
+ 			usleep_range(5000, 6000);
+ 			regmap_update_bits(zsi->scu_map, SYS_RESET,
+ 					   SYS_RESET_SLIC0, 0);
+ 			usleep_range(20000, 25000);
++			if (zsi->reset_mode_dance) {
++				/* OEM SPI_Reset (HIR 0xC/0xE): bit 4 pulse too. */
++				regmap_update_bits(zsi->scu_map, SYS_RESET,
++						   SYS_RESET_ZSI_BIT4, SYS_RESET_ZSI_BIT4);
++				msleep(5);
++				regmap_update_bits(zsi->scu_map, SYS_RESET,
++						   SYS_RESET_ZSI_BIT4, 0);
++			}
+ 		}
+ 		return 0;
+ 	}
+@@ -334,6 +420,7 @@
+ 		return -EIO;
+ 
+ 	mutex_lock(&zsi->lock);
++	zsi_prep_transaction_locked(zsi);
+ 	for (i = 0; i < len; i++) {
+ 		ret = zsi_write_byte(zsi, buf[i]);
+ 		if (ret)
+@@ -367,6 +454,7 @@
+ 		return -EIO;
+ 
+ 	mutex_lock(&zsi->lock);
++	zsi_prep_transaction_locked(zsi);
+ 
+ 	ret = zsi_select_ec_locked(zsi, ec);
+ 	if (ret)
+@@ -402,6 +490,7 @@
+ 		return -EIO;
+ 
+ 	mutex_lock(&zsi->lock);
++	zsi_prep_transaction_locked(zsi);
+ 
+ 	ret = zsi_select_ec_locked(zsi, ec);
+ 	if (ret)
+@@ -525,12 +614,25 @@
+ 	if (zsi->gap_us < 500)
+ 		zsi->gap_us = 500;
+ 
++	/* 006 OEM plumbing params; DT properties win over module params. */
++	zsi->cs = zsi_cs > 0xff ? 0xff : zsi_cs;
++	zsi->tx_prep = zsi_tx_prep;
++	zsi->reset_mode_dance = zsi_reset_mode_dance;
++	{
++		u32 dt_cs;
++
++		if (!device_property_read_u32(dev, "airoha,zsi-cs", &dt_cs))
++			zsi->cs = dt_cs > 0xff ? 0xff : dt_cs;
++	}
++
+ 	mutex_lock(&en75xx_zsi_list_lock);
+ 	list_add_tail(&zsi->node, &en75xx_zsi_list);
+ 	mutex_unlock(&en75xx_zsi_list_lock);
+ 
+ 	platform_set_drvdata(pdev, zsi);
+-	dev_info(dev, "ZSI transport ready (gap %u us%s)\n", zsi->gap_us,
++	dev_info(dev,
++		 "ZSI transport ready (gap %u us, cs %u, tx_prep %d, mode_dance %d%s)\n",
++		 zsi->gap_us, zsi->cs, zsi->tx_prep, zsi->reset_mode_dance,
+ 		 zsi->legacy_scu ? ", legacy SCU" : "");
+ 
+ 	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
