@@ -1,0 +1,89 @@
+AN7581: chip-SCU clock-enable hook for the OEM SPI_cfg bit-16 write (007).
+
+spi.ko SPI_cfg (real-chip path, HIR 0xE/0xC) read-modify-writes one
+more register our driver never touched: a chip-SCU clock/reset register
+with bit 16 set.  Unlike every other register in the OEM sequence this
+address is NOT a constant in spi.ko - SPI_cfg reads it from the
+pcmChipScuQuery() structure that pcm1.ko hands out at runtime (report:
+devices/ZN504XG-D/reports/a1_spi_ko_diff_report_20261021.md, diff table
+row 7).  Extracting the exact address needs a pcm1.ko disassembly pass
+(A2), so this patch ships the mechanism only:
+
+  - module param zsi_scu_clk_en_addr (physical address, default 0 =
+    feature off) and zsi_scu_clk_en_bit (default 16, the OEM value).
+  - hw_init (non-legacy path): when the address is non-zero, ioremap,
+    set the bit, iounmap, and log the poke so a debug build proves it
+    ran.
+
+Once A2 lands the address, enabling the OEM write is a single
+/etc/modules.d line - no rebuild.  Until then the default build is
+byte-identical in behaviour to the 006 build.
+
+Two related open items from the A1 report close themselves without
+code:
+  - cs value: the dts has slic@0 (reg = <0>), so cs = 0 and 006's
+    zsi_cs=0 default is correct.
+  - 0xbfbd4098: the OEM only writes it for cs in {1,2}; with cs = 0 the
+    stock driver skips it too, and it sits outside the zsi0 node
+    mapping (reg size 0x1000), so there is nothing to replicate.
+
+Signed-off-by: ZN504XG-D voice porting project
+--- a/src/en75xx_zsi.c
++++ b/src/en75xx_zsi.c
+@@ -149,6 +149,25 @@
+ 	"OEM SPI_Reset mode dance on SYS_IFACE_MODE: 0 -> f -> ZSI with "
+ 	"delays, plus a SYS_RESET bit4 pulse (default true)");
+ 
++/*
++ * 007: OEM SPI_cfg programs a chip-SCU clock/reset register through
++ * pcmChipScuQuery (a pcm1.ko internal whose register address is not in
++ * spi.ko).  Until the A2 pcm1.ko disassembly lands the exact address,
++ * the mechanism lives here disabled: set zsi_scu_clk_en_addr to the
++ * physical address from /etc/modules.d and the driver sets bit
++ * zsi_scu_clk_en_bit (default 16, the OEM value) during hw_init.
++ */
++static unsigned long zsi_scu_clk_en_addr;
++module_param(zsi_scu_clk_en_addr, ulong, 0644);
++MODULE_PARM_DESC(zsi_scu_clk_en_addr,
++	"physical address of the OEM chip-SCU clock-enable register; "
++	"0 (default) disables the write");
++
++static unsigned int zsi_scu_clk_en_bit = 16;
++module_param(zsi_scu_clk_en_bit, uint, 0644);
++MODULE_PARM_DESC(zsi_scu_clk_en_bit,
++	"bit to set in zsi_scu_clk_en_addr (default 16, the OEM value)");
++
+ /* ------------------------------------------------------------------ */
+ /* Byte level                                                          */
+ /* ------------------------------------------------------------------ */
+@@ -284,6 +303,30 @@
+ 				 "SCU interface mode write failed: %d\n", ret);
+ 	}
+ 
++	/*
++	 * 007: OEM SPI_cfg (real-chip path) also read-modify-writes a
++	 * chip-SCU clock-enable register (bit 16) looked up through
++	 * pcmChipScuQuery.  The address lives in pcm1.ko, so it is a
++	 * module parameter here; zero (default) skips the write.
++	 */
++	if (!zsi->legacy_scu && zsi_scu_clk_en_addr) {
++		void __iomem *scu_reg = ioremap(zsi_scu_clk_en_addr, 4);
++
++		if (scu_reg) {
++			writel(readl(scu_reg) | BIT(zsi_scu_clk_en_bit %
++						    BITS_PER_TYPE(u32)),
++			       scu_reg);
++			iounmap(scu_reg);
++			dev_info(zsi->dev,
++				 "OEM chip-SCU clk-en: %pa bit %u set\n",
++				 &zsi_scu_clk_en_addr, zsi_scu_clk_en_bit);
++		} else {
++			dev_warn(zsi->dev,
++				 "chip-SCU clk-en ioremap(0x%08lx) failed\n",
++				 zsi_scu_clk_en_addr);
++		}
++	}
++
+ 	/* wrapper config + enable */
+ 	writel(ZSI_CFG_VAL, zsi->base + ZSI_CFG);
+ 	writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL, zsi->base + ZSI_EN);
