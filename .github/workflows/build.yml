@@ -26,6 +26,13 @@ on:
         required: false
         default: ""
         type: string
+      channel:
+        description: 通道（10-19 奇偶约定：偶数=release 发布固件、奇数=debug 调试固件；写进 /etc/pon-build-tag 行尾）
+        required: true
+        type: choice
+        options:
+          - "release"
+          - "debug"
 
 permissions:
   contents: read
@@ -229,7 +236,7 @@ jobs:
           ponwrt_rev=$(git -C ponwrt rev-parse --short HEAD)
           build_date=$(date -u +%Y-%m-%d)
           mkdir -p onu-build/files/etc
-          printf '%s · %s · ponwrt %s · %s\n' "$label" "$suite_sha" "$ponwrt_rev" "$build_date" > onu-build/files/etc/pon-build-tag
+          printf '%s · %s · ponwrt %s · %s · %s\n' "$label" "$suite_sha" "$ponwrt_rev" "$build_date" "${{ inputs.channel }}" > onu-build/files/etc/pon-build-tag
           echo "pon-build-tag: $(cat onu-build/files/etc/pon-build-tag)"
 
       # airoha-pond 双版本（补丁版=北京联通 10G EPON OAM 兼容，stock=原厂）
