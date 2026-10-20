@@ -1,0 +1,37 @@
+diff --git a/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi b/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi
+index 61b2ac4..c101aa5 100644
+--- a/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi
++++ b/target/linux/airoha/dts/an7581-znxt-zn50xg-d-common.dtsi
+@@ -165,9 +165,14 @@
+ 		 * Only zsi0 claims the pins: muxing the same group from pcm0
+ 		 * as well would just earn a second -EBUSY style warning from
+ 		 * the pinmux core, the mux result is identical.
++		 *
++		 * 4-2 single-variable (build-11): the pcm_spi hypothesis reads
++		 * back 0xffff from the SLIC; retry with the pcm1 group
++		 * (GPIO22-25, function "pcm") and no CS pin.  201-06 fallback
++		 * documented in its header.
+ 		 */
+ 		pinctrl-names = "default";
+-		pinctrl-0 = <&pcm_spi_pins>, <&pcm_spi_cs1_pins>;
++		pinctrl-0 = <&pcm1_pins>;
+ 
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+@@ -245,6 +250,16 @@
+ 			groups = "pcm_spi_cs1";
+ 		};
+ 	};
++
++	/* PCM engine 1 pin group (GPIO22-25, mux field GPIO_PCM1_MODE_MASK
++	 * in REG_GPIO_SPI_CS1_MODE).  4-2 alternative to pcm_spi_pins for
++	 * the ZSI transport. */
++	pcm1_pins: pcm1-pins {
++		mux {
++			function = "pcm";
++			groups = "pcm1";
++		};
++	};
+ };
+ 
+ &snfi {
