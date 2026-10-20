@@ -1,0 +1,152 @@
+AN7581: mirror the OEM spi.ko ZSI bring-up sequence in en75xx_zsi, and
+relax the le9642 detect gate for the Le9643.
+
+Evidence (reverse-engineered 2026-10-20 from the stock ZN504 firmware
+spi.ko, SPI_cfg @0x2e0 / SPI_Reset @0x1f50, capstone + RELA analysis;
+report: devices/ZN504XG-D/analysis/original-backup/spi_seq_report.txt):
+
+  - The OEM stack accesses the SCU through the MIPS KSEG1 alias
+    (VA 0xbfb0_xxxx == PA 0x1fb0_xxxx), which is why MMIO scans keyed on
+    0x1fXX constants found nothing in spi.ko.
+  - SPI_cfg writes the interface mode: PA 0x1fb00094 (SYS_IFACE_MODE) = 5
+    (ZSI) before touching the ZSI wrapper.  Our AN7581 path never wrote
+    this register; the wrapper ACKs bytes but the PCM block never drives
+    the ZSI pins, so every register read returns 0x00.
+  - SPI_Reset pulses PA 0x1fb00834 bit 0 (SYS_RESET_SLIC0) to reset the
+    SLIC itself.  The upstream reset-controller enumeration has no ID for
+    this bit (EN7581_PCM1_ZSI_ISI_RST only resets the wrapper), so a SLIC
+    held in reset stays in reset and answers every ZSI transaction with
+    0x00 - the exact signature seen on the 504 ("unexpected chip id 00 00"
+    on every even bus slot).
+
+Changes:
+
+  en75xx_zsi.c
+    - probe: grab the "airoha,en7581-scu" syscon regmap on the non-legacy
+      path (non-fatal if absent).
+    - hw_init: write SYS_IFACE_MODE = SYS_IFACE_MODE_ZSI via regmap on
+      the non-legacy path, before enabling the wrapper.
+    - slic_reset: after the wrapper reset, pulse SYS_RESET_SLIC0
+      (assert = bit set, same polarity as the legacy EN751221 path below).
+
+  en75xx_slic_le9642.c
+    - le9642_detect: fail only on RCN mismatch.  An unknown PCN (e.g. the
+      Le9643 on the ZN504XG-D) logs a warning and continues; the
+      hard-coded device/channel profiles are still Le9642 BB variants, so
+      this is best-effort bring-up, not full Le9643 support.
+
+Single-variable experiment for build-9: the dts pinmux is intentionally
+untouched in this patch.  If the SLIC still reads 0x00 after this, the
+next candidate is the 201-06 documented fallback (zsi pinctrl-0 ->
+&pcm1_pins, GPIO22-25) as a separate build.
+
+Signed-off-by: ZN504XG-D voice porting project
+diff --git a/src/en75xx_slic_le9642.c b/src/en75xx_slic_le9642.c
+index 35bfe5b..65d39a3 100644
+diff -ruN tmp_pref005_src/en75xx_slic_le9642.c tmp_pcheck/src/en75xx_slic_le9642.c
+--- a/en75xx_slic_le9642.c	2026-10-20 14:25:28.866690200 +0800
++++ b/src/en75xx_slic_le9642.c	2026-10-20 14:27:31.156522400 +0800
+@@ -335,13 +335,22 @@
+ 	slic->rcn = id[0];
+ 	slic->pcn = id[1];
+ 
+-	if (id[0] != VP886_RCN_LE964X ||
+-	    (id[1] != VP886_PCN_LE9642 && id[1] != VP886_PCN_LE9641)) {
++	if (id[0] != VP886_RCN_LE964X) {
+ 		dev_err(slic->dev, "unexpected chip id %02x %02x\n",
+ 			id[0], id[1]);
+ 		return -ENODEV;
+ 	}
+ 
++	/*
++	 * The ZN504XG-D ships a Le9643 whose PCN is not in the table below;
++	 * the hard-coded device/channel profiles are still Le9642 BB
++	 * variants, so anything unknown is a best-effort bring-up.  Warn
++	 * loudly and continue instead of giving up.
++	 */
++	if (id[1] != VP886_PCN_LE9642 && id[1] != VP886_PCN_LE9641)
++		dev_warn(slic->dev, "unverified PCN %02x, trying anyway\n",
++			 id[1]);
++
+ 	dev_info(slic->dev, "Le964%c detected (rcn %02x pcn %02x)\n",
+ 		 id[1] == VP886_PCN_LE9642 ? '2' : '1', id[0], id[1]);
+ 	return 0;
+diff -ruN tmp_pref005_src/en75xx_zsi.c tmp_pcheck/src/en75xx_zsi.c
+--- a/en75xx_zsi.c	2026-10-20 14:25:28.868670000 +0800
++++ b/src/en75xx_zsi.c	2026-10-20 14:27:31.154519400 +0800
+@@ -88,6 +88,7 @@
+ 	struct reset_control	*rst;
+ 	struct en75xx_scu	sys;
+ 	struct en75xx_scu	scu;
++	struct regmap		*scu_map;
+ 	bool			legacy_scu;
+ 	bool			pinctrl_managed;
+ 	struct mutex		lock;
+@@ -208,6 +209,20 @@
+ 			goto out_unlock;
+ 	}
+ 
++	/*
++	 * OEM AN7581 sequence (reverse-engineered from spi.ko SPI_cfg):
++	 * select ZSI mode in the SCU before the wrapper starts moving bytes.
++	 * Without this the PCM block never actually drives the ZSI pins and
++	 * every register read returns 0x00.
++	 */
++	if (!zsi->legacy_scu && !IS_ERR_OR_NULL(zsi->scu_map)) {
++		ret = regmap_update_bits(zsi->scu_map, SYS_IFACE_MODE,
++					 SYS_IFACE_MODE_MASK, SYS_IFACE_MODE_ZSI);
++		if (ret)
++			dev_warn(zsi->dev,
++				 "SCU interface mode write failed: %d\n", ret);
++	}
++
+ 	/* wrapper config + enable */
+ 	writel(ZSI_CFG_VAL, zsi->base + ZSI_CFG);
+ 	writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL, zsi->base + ZSI_EN);
+@@ -255,10 +270,29 @@
+ 		/* the reset drops the wrapper enable, put it back */
+ 		writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL,
+ 		       zsi->base + ZSI_EN);
++	}
++
++	/*
++	 * OEM AN7581 sequence (reverse-engineered from spi.ko SPI_Reset):
++	 * the SLIC itself is reset through SCU SYS_RESET bit 0, which the
++	 * upstream reset-controller enumeration does not expose.  The wrapper
++	 * reset above does not release the SLIC from reset, and a SLIC held
++	 * in reset answers every ZSI transaction with 0x00.  Assert polarity
++	 * matches the legacy EN751221 path below: set = in reset.
++	 */
++	if (!zsi->legacy_scu) {
++		if (!IS_ERR_OR_NULL(zsi->scu_map)) {
++			regmap_update_bits(zsi->scu_map, SYS_RESET,
++					   SYS_RESET_SLIC0, SYS_RESET_SLIC0);
++			usleep_range(5000, 6000);
++			regmap_update_bits(zsi->scu_map, SYS_RESET,
++					   SYS_RESET_SLIC0, 0);
++			usleep_range(20000, 25000);
++		}
+ 		return 0;
+ 	}
+ 
+-	if (!zsi->legacy_scu || !en75xx_scu_valid(&zsi->sys))
++	if (!en75xx_scu_valid(&zsi->sys))
+ 		return 0;
+ 
+ 	mutex_lock(&zsi->lock);
+@@ -474,6 +508,15 @@
+ 	if (IS_ERR(zsi->slic_clk))
+ 		return dev_err_probe(dev, PTR_ERR(zsi->slic_clk),
+ 				     "cannot enable SLIC clock\n");
++	/*
++	 * Non-legacy (AN7581) path: the OEM spi.ko programs the ZSI interface
++	 * mode and the SLIC reset bit straight in the SCU block.  Grab the
++	 * syscon regmap so hw_init()/slic_reset() can mirror that sequence.
++	 * Absence is non-fatal: the driver then relies on pinctrl/reset/clk
++	 * providers alone, as before.
++	 */
++	if (!zsi->legacy_scu)
++		zsi->scu_map = syscon_regmap_lookup_by_compatible("airoha,en7581-scu");
+ 
+ 	zsi->pinctrl_managed = dev->of_node &&
+ 		of_property_present(dev->of_node, "pinctrl-0");
