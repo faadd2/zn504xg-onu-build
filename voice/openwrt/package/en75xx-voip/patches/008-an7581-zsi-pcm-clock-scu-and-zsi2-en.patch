@@ -1,0 +1,190 @@
+AN7581: program the PCM clock SCU registers on the non-legacy path (008).
+
+build-13 ran the whole enable matrix: the 006 transaction layer, the
+007 chip-SCU clock-enable hook and every cs/tx_prep/mode_dance/gap
+variant came back "unexpected chip id ff ff" / bring-up -19 (B-run,
+11 probe rounds in dmesg, plus an independently rerun 6-round matrix
+with sysfs read-back; reports:
+devices/ZN504XG-D/reports/build13_voice_test_report_20261021.md and
+build13_review_report_20261021.md).  devmem forensics then isolated
+the next suspect: the PCM clock path.  The driver's own legacy SCU
+sequence programs three chip-SCU (0x1fa20000) PCM clock registers -
+SCU_PCM_CLK_SRC_SEL |= 0x1c, SCU_PCM_CLK_DIV = 8, SCU_PCM_CLK_OUT =
+0x00a00301 - and on build-13 all three read back idle (0 / 0x7fff /
+0), because the non-legacy AN7581 path never executes that code and
+no clock provider touches them.  Without them the PCM block never
+clocks PCLK/FSYNC to the SLIC, matching the floating-bus 0xff
+signature.
+
+Changes (all in en75xx_zsi.c, non-legacy path only):
+
+  - hw_init: ioremap the chip-SCU block (no regmap handle exists on
+    this path; same mechanism as the 007 hook) and mirror the legacy
+    writes, gated bit-by-bit for single-variable A/B.
+  - New module params with legacy defaults: zsi_pcm_clk_base (0 =
+    feature off), zsi_pcm_clk_mask (1 = SRC_SEL RMW, 2 = DIV write,
+    4 = OUT write), zsi_pcm_clk_src_sel_or, zsi_pcm_clk_div_val,
+    zsi_pcm_clk_out_val - all runtime-tweakable from /etc/modules.d.
+  - zsi_zsi2_en_addr / zsi_zsi2_en_val: the OEM SPI_cfg branch
+    selected by SYS 0x1fb00094 bit0 = 1 (this board) additionally
+    does 0x1fbd3010 |= 0x19; that register sits outside the zsi0
+    node mapping, so it ioremaps like the 007 hook.  Default 0 =
+    off: with no live OEM reference the A/B modules.d experiment
+    arbitrates whether that branch matters.
+  - Probe banner extended with the pcm_clk / zsi2_en values so the
+    build-15 debug image proves from dmesg alone which writes ran.
+
+Acceptance (build-15, same byte-level gate as build-13): banner shows
+the new fields, dmesg shows "Le964%c detected (rcn 08 pcn ..)"
+instead of "unexpected chip id ff ff", a devmem re-snapshot shows
+0x1fa200d4/d8/148 written, and the FXS character device appears.
+
+Signed-off-by: ZN504XG-D voice porting project
+--- a/src/en75xx_zsi.c
++++ b/src/en75xx_zsi.c
+@@ -168,6 +168,71 @@
+ MODULE_PARM_DESC(zsi_scu_clk_en_bit,
+ 	"bit to set in zsi_scu_clk_en_addr (default 16, the OEM value)");
+ 
++/*
++ * 008: PCM clock path (build-13 devmem forensics, report
++ * devices/ZN504XG-D/reports/build13_review_report_20261021.md sec. 3.1).
++ * The legacy SCU sequence above programs three chip-SCU (0x1fa20000)
++ * PCM clock registers so the PCM block actually clocks PCLK/FSYNC to
++ * the SLIC; the non-legacy AN7581 path never did and on build-13 all
++ * three read back idle (DIV=0, OUT=0x7fff, SRC_SEL=0).  The chip SCU
++ * has no regmap handle on the non-legacy path, so the writes go
++ * through an ioremap window exactly like the 007 hook.
++ */
++#define ZSI_PCM_CLK_MAP_SIZE		0x200
++
++static unsigned long zsi_pcm_clk_base = 0x1fa20000;
++module_param(zsi_pcm_clk_base, ulong, 0644);
++MODULE_PARM_DESC(zsi_pcm_clk_base,
++	"physical base of the chip-SCU block holding the PCM clock "
++	"registers; 0 disables the 008 writes (default 0x1fa20000)");
++
++static unsigned int zsi_pcm_clk_mask = 0x7;
++module_param(zsi_pcm_clk_mask, uint, 0644);
++MODULE_PARM_DESC(zsi_pcm_clk_mask,
++	"bitmask selecting which 008 PCM clock writes run: 1 = SRC_SEL "
++	"|= zsi_pcm_clk_src_sel_or, 2 = DIV = zsi_pcm_clk_div_val, "
++	"4 = OUT = zsi_pcm_clk_out_val (default 0x7 = all three)");
++
++static unsigned int zsi_pcm_clk_src_sel_or = PCM_CLK_SRC_ZSI;
++module_param(zsi_pcm_clk_src_sel_or, uint, 0644);
++MODULE_PARM_DESC(zsi_pcm_clk_src_sel_or,
++	"value ORed into SCU_PCM_CLK_SRC_SEL (default 0x1c, the legacy "
++	"ZSI clock source select)");
++
++static unsigned int zsi_pcm_clk_div_val = SCU_PCM_CLK_DIV_VAL;
++module_param(zsi_pcm_clk_div_val, uint, 0644);
++MODULE_PARM_DESC(zsi_pcm_clk_div_val,
++	"value written to SCU_PCM_CLK_DIV (default 8, the legacy value)");
++
++static unsigned int zsi_pcm_clk_out_val = SCU_PCM_CLK_OUT_VAL;
++module_param(zsi_pcm_clk_out_val, uint, 0644);
++MODULE_PARM_DESC(zsi_pcm_clk_out_val,
++	"value written to SCU_PCM_CLK_OUT (default 0x00a00301, the "
++	"legacy value)");
++
++/*
++ * 008 (b): SYS 0x1fb00094 bit0 reads 1 on this board, which per the
++ * OEM spi.ko SPI_cfg disassembly (a1_spi_ko_diff_report_20261021.md)
++ * selects the 0xbfbd1010 / 0xbfbd3010 branch instead of the chip-SCU
++ * bit16 branch.  0xbfbd1010 |= 0x19 this driver already does (ZSI_EN);
++ * the OEM HIR 0xC sequence additionally does 0xbfbd3010 |= 0x19.
++ * That register sits outside the zsi0 node 0x1000 mapping, so it
++ * ioremaps like the 007 hook.  Off by default: no live OEM reference
++ * exists to arbitrate the branch, so the A/B modules.d experiment
++ * decides whether this write matters.
++ */
++static unsigned long zsi_zsi2_en_addr;
++module_param(zsi_zsi2_en_addr, ulong, 0644);
++MODULE_PARM_DESC(zsi_zsi2_en_addr,
++	"physical address of the OEM second wrapper-enable register "
++	"(0x1fbd3010 on the SYS 0x94 bit0=1 branch); 0 (default) skips "
++	"the write");
++
++static unsigned int zsi_zsi2_en_val = ZSI_EN_VAL;
++module_param(zsi_zsi2_en_val, uint, 0644);
++MODULE_PARM_DESC(zsi_zsi2_en_val,
++	"value ORed into zsi_zsi2_en_addr (default 0x19, the OEM value)");
++
+ /* ------------------------------------------------------------------ */
+ /* Byte level                                                          */
+ /* ------------------------------------------------------------------ */
+@@ -327,6 +392,62 @@
+ 		}
+ 	}
+ 
++	/*
++	 * 008: mirror the legacy path's PCM clock programming (above) on
++	 * the non-legacy path.  Without these the PCM block never clocks
++	 * PCLK/FSYNC to the SLIC and every chip-id read floats to 0xff -
++	 * the build-13 devmem snapshot shows all three registers idle.
++	 * zsi_pcm_clk_mask isolates the writes for the A/B matrix.
++	 */
++	if (!zsi->legacy_scu && zsi_pcm_clk_base) {
++		void __iomem *pcm_clk = ioremap(zsi_pcm_clk_base,
++						ZSI_PCM_CLK_MAP_SIZE);
++
++		if (pcm_clk) {
++			if (zsi_pcm_clk_mask & 1)
++				writel(readl(pcm_clk + SCU_PCM_CLK_SRC_SEL) |
++				       zsi_pcm_clk_src_sel_or,
++				       pcm_clk + SCU_PCM_CLK_SRC_SEL);
++			if (zsi_pcm_clk_mask & 2)
++				writel(zsi_pcm_clk_div_val,
++				       pcm_clk + SCU_PCM_CLK_DIV);
++			if (zsi_pcm_clk_mask & 4)
++				writel(zsi_pcm_clk_out_val,
++				       pcm_clk + SCU_PCM_CLK_OUT);
++			iounmap(pcm_clk);
++			dev_info(zsi->dev,
++				 "PCM clock SCU: base %pa mask 0x%x (src|0x%x, div 0x%x, out 0x%x)\n",
++				 &zsi_pcm_clk_base, zsi_pcm_clk_mask,
++				 zsi_pcm_clk_src_sel_or, zsi_pcm_clk_div_val,
++				 zsi_pcm_clk_out_val);
++		} else {
++			dev_warn(zsi->dev,
++				 "PCM clock SCU ioremap(0x%08lx) failed\n",
++				 zsi_pcm_clk_base);
++		}
++	}
++
++	/*
++	 * 008 (b): OEM SPI_cfg on the SYS 0x94 bit0=1 branch also enables
++	 * the second ZSI wrapper block (0x1fbd3010 |= 0x19).  Off by
++	 * default; the A/B modules.d experiment arbitrates the branch.
++	 */
++	if (!zsi->legacy_scu && zsi_zsi2_en_addr) {
++		void __iomem *zsi2_en = ioremap(zsi_zsi2_en_addr, 4);
++
++		if (zsi2_en) {
++			writel(readl(zsi2_en) | zsi_zsi2_en_val, zsi2_en);
++			iounmap(zsi2_en);
++			dev_info(zsi->dev,
++				 "OEM second ZSI en: %pa |= 0x%x\n",
++				 &zsi_zsi2_en_addr, zsi_zsi2_en_val);
++		} else {
++			dev_warn(zsi->dev,
++				 "second ZSI en ioremap(0x%08lx) failed\n",
++				 zsi_zsi2_en_addr);
++		}
++	}
++
+ 	/* wrapper config + enable */
+ 	writel(ZSI_CFG_VAL, zsi->base + ZSI_CFG);
+ 	writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL, zsi->base + ZSI_EN);
+@@ -674,8 +795,9 @@
+ 
+ 	platform_set_drvdata(pdev, zsi);
+ 	dev_info(dev,
+-		 "ZSI transport ready (gap %u us, cs %u, tx_prep %d, mode_dance %d%s)\n",
++		 "ZSI transport ready (gap %u us, cs %u, tx_prep %d, mode_dance %d, pcm_clk 0x%lx/0x%x, zsi2_en 0x%lx%s)\n",
+ 		 zsi->gap_us, zsi->cs, zsi->tx_prep, zsi->reset_mode_dance,
++		 zsi_pcm_clk_base, zsi_pcm_clk_mask, zsi_zsi2_en_addr,
+ 		 zsi->legacy_scu ? ", legacy SCU" : "");
+ 
+ 	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
