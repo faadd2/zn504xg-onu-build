@@ -1,0 +1,38 @@
+--- a/src/ubus.c
++++ b/src/ubus.c
+@@ -156,11 +156,20 @@
+ ubus_init(void)
+ {
+ 	ctx = ubus_connect(config->local->ubus_socket);
+-	if (!ctx) return -1;
++	if (!ctx) {
++		/* 0003 patch（3-6 可观测性）：原静默 return 使失败无任何日志 */
++		log_message(NAME, L_NOTICE, "ubus connect failed (socket: %s)\n",
++				config->local->ubus_socket ? config->local->ubus_socket : "(null)");
++		return -1;
++	}
+ 
+ 	ubus_add_uloop(ctx);
+ 
+-	if (ubus_add_object(ctx, &main_object)) return -1;
++	if (ubus_add_object(ctx, &main_object)) {
++		log_message(NAME, L_NOTICE, "ubus object 'tr069' registration failed "
++				"(duplicate object name or ubusd unreachable)\n");
++		return -1;
++	}
+ 
+ 	return 0;
+ }
+--- a/src/easycwmp.c
++++ b/src/easycwmp.c
+@@ -325,7 +325,9 @@
+ 		exit(EXIT_FAILURE);
+ 	}
+ 
+-	if (ubus_init()) log_message(NAME, L_DEBUG, "ubus initialization failed\n");
++	/* 0003 patch（3-6 可观测性）：原 L_DEBUG 使 ubus 注册失败在默认日志级别完全静默
++	 * （设备实证：tr069 对象从未注册且无任何报错日志，定位成本极高） */
++	if (ubus_init()) log_message(NAME, L_NOTICE, "ubus initialization failed, 'tr069' object unavailable\n");
+ 
+ 	http_server_init();
+ 
