@@ -92,6 +92,10 @@ define Package/easycwmp/install
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/ext/openwrt/config/easycwmp $(1)/etc/config
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ext/openwrt/init.d/easycwmpd $(1)/etc/init.d
+	# 3-1 固化：身份默认值 uci-defaults（伪装五元组；SN 不入库——隐私纪律 10-22 用户令，
+	# 经 LuCI 身份页填入）+ 首启自启 enable。脚本见 files/etc/uci-defaults/99-easycwmp-identity
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/etc/uci-defaults/99-easycwmp-identity $(1)/etc/uci-defaults/
 ifeq ($(EASYCWMP_BACKUP_DATA_FILE),y)
 	$(INSTALL_DIR) $(1)/etc/easycwmp
 endif

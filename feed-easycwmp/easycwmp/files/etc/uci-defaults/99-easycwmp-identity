@@ -1,0 +1,23 @@
+#!/bin/sh
+# easycwmp 伪装身份默认值 — 伪装方案 B 固化（3-1/3-5）：
+# uci（/etc/config/easycwmp @device）为身份单一事实源，init 回填已随 0002 patch 删除。
+#
+# 隐私纪律（10-22 用户令）：设备序列号(SN)不入库、不进固件——本脚本只写五元组；
+# SN 首次部署后由人工经 LuCI「状态 → ACS（身份）」子页面填入
+# （精确值见工作区 devices/PT1570-R10/info/tr069_identity_extract_20261020.md）。
+#
+# 严禁多行值：uci 非法多行值会毒化整个配置的写操作
+# （10-20 热部署实证：manufacturer 带裸换行致全部 uci set 报 Invalid argument）。
+[ -f /etc/config/easycwmp ] || exit 0
+uci -q get easycwmp.@device[0] >/dev/null 2>&1 || exit 0
+uci -q batch <<'EOF'
+set easycwmp.@device[0].manufacturer='Youhua'
+set easycwmp.@device[0].oui='D0F76E'
+set easycwmp.@device[0].product_class='PT1570-R10-C'
+set easycwmp.@device[0].hardware_version='V2.01.02'
+set easycwmp.@device[0].software_version='V3.04.15721U01'
+EOF
+uci -q commit easycwmp
+# 首次安装生成 rc.d 自启链接（固件新装包缺省不 enable）
+/etc/init.d/easycwmpd enable 2>/dev/null || true
+exit 0
