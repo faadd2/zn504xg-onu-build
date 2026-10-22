@@ -119,6 +119,7 @@ jobs:
           for p in onu-suite/luci-app-onu onu-suite/luci-app-onu-internet \
                    onu-suite/luci-app-onu-iptv onu-suite/luci-app-onu-voice \
                    onu-suite/luci-app-onu-mgmt onu-suite/luci-app-onu-migrate \
+                   onu-suite/luci-app-onu-fax \
                    onu-suite/luci-app-speedcheck onu-suite/luci-app-netspeedtest \
                    onu-suite/luci-app-airoha-npu onu-suite/zn504xg-defaults; do
             cp -r "$p" ponwrt/package/
@@ -243,7 +244,7 @@ jobs:
           grep "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_gemtek_xg2010g=y" .config || { echo "::error:: xg2010g per-device missing!"; exit 1; }
           [ "$(grep -c "^CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y" .config)" -le 2 ] || { echo "::error:: more than 2 devices selected!"; exit 1; }
           echo "===== resolved custom packages ====="
-          grep -E "^CONFIG_PACKAGE_(luci-app-pon|luci-app-onu|luci-app-speedcheck|luci-app-netspeedtest|luci-app-airoha-npu|zn504xg-defaults|easycwmp|curl)=" .config || echo "WARNING: custom packages missing!"
+          grep -E "^CONFIG_PACKAGE_(luci-app-pon|luci-app-onu|luci-app-onu-fax|luci-app-speedcheck|luci-app-netspeedtest|luci-app-airoha-npu|zn504xg-defaults|easycwmp|asterisk|curl)=" .config || echo "WARNING: custom packages missing!"
 
       - name: Download sources
         working-directory: ponwrt
@@ -295,7 +296,7 @@ jobs:
         working-directory: ponwrt
         run: |
           echo "===== final .config custom package symbols ====="
-          grep -E "^CONFIG_PACKAGE_(luci-app-pon|luci-app-onu[a-z-]*|luci-app-speedcheck|luci-app-netspeedtest|luci-app-airoha-npu|zn504xg-defaults|easycwmp)=" .config || echo "::error::custom packages missing from final .config!"
+          grep -E "^CONFIG_PACKAGE_(luci-app-pon|luci-app-onu[a-z-]*|luci-app-speedcheck|luci-app-netspeedtest|luci-app-airoha-npu|zn504xg-defaults|easycwmp|asterisk|asterisk-[a-z-]+|coreutils-base64)=" .config || echo "::error::custom packages missing from final .config!"
           echo "===== built package files ====="
           find bin/targets/airoha/an7581/packages -maxdepth 1 \( -name "luci-app-*.ipk" -o -name "luci-app-*.apk" -o -name "zn504xg-defaults*.ipk" -o -name "zn504xg-defaults*.apk" -o -name "easycwmp*.ipk" -o -name "easycwmp*.apk" \) 2>/dev/null | sort || true
 
