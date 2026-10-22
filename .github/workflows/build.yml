@@ -399,7 +399,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: "PonWrt an7581 build ${{ github.run_number }} (${{ github.event.inputs.ponwrt_ref || 'master' }})"
+          # 编号新规（10-22 13:34 拍板）：tag 与构建 label 同号，不再用 run_number 计数器
+          tag_name: ${{ inputs.build_label }}
+          name: "PonWrt an7581 ${{ inputs.build_label }} (${{ github.event.inputs.ponwrt_ref || 'master' }})"
           generate_release_notes: true
           files: assets/*
