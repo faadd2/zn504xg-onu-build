@@ -1,0 +1,392 @@
+AN7581: OEM-order bring-up with runtime HIR record selection (009).
+
+build-13/build-15 exhausted the register-layer hypotheses (006
+transaction plumbing, 007 clk-en, 008 legacy-mirror PCM clock writes):
+every variant still floats the chip-id read to 0xff.  The 10-29
+live-machine cross-check (a second, factory-firmware unit, reports
+devices/ZN504XG-D/reports/newdevice_slic_crosscheck_20261029.md and
+patch009_mapping_and_acceptance_20261029.md) then corrected the model:
+
+  - the OEM non-legacy bring-up never touches the legacy SCU d4/d8/148
+    PCM clock registers - on the live machine all three sit at their
+    idle defaults while PCM1 runs - so the 008 writes are deleted;
+  - the OEM set_gpio_clocksrc step is table-driven by HIR, read at
+    runtime from the SoC window OEM GET_HIR uses (0x1faf0000 + 0x64);
+    user-space reads of that block return 0xDEADBEEF poison (or hang
+    the older kernel), which is why the HIR default can never come
+    from userspace forensics - the driver must read it in kernel mode
+    exactly like the OEM;
+  - ZSI_CFG holds 0x0f030313 on the live machine without any OEM
+    write, so the unconditional ZSI_CFG write is dropped on the
+    non-legacy path (cfg_write=1 brings it back for A/B);
+  - HIR 0xe additionally enables the second ZSI wrapper
+    (0x1fbd3010 |= 0x19, OEM SPI_cfg dual-wrapper branch), now
+    automatic instead of the 008(b) off-by-default parameter;
+  - OEM SPI_Reset pulses SYS_RESET bit17 and bit25 around the SLIC0
+    pulse on HIR 0xc/0xe.
+
+Changes (all in en75xx_zsi.c, non-legacy path only):
+
+  - hw_init: read HIR = readl(0x1faf0064) >> 16 via a fresh ioremap,
+    log it, and apply the chipScuReg record the OEM table selects:
+    HIR 0xa -> 0x1fa20214 RMW (mask 0x1ff3300, set 0x11300|arg1) +
+    0x1fa201cc |= 0xc00; HIR 0xc -> same on 0x1fa20214/0x3f3300 +
+    0x1fa201d0 |= 0xc00; HIR 0xe -> 0x1fa20218/0x3f3300 +
+    0x1fa201d0 |= 0xc00; any other HIR -> no record writes at all,
+    matching the OEM gpio_clocksrc_init branch structure.
+  - Delete the 008 legacy-mirror PCM clock writes (SCU d4/d8/148) and
+    their parameters.
+  - Delete the unconditional ZSI_CFG write on the non-legacy path;
+    new module parameter cfg_write (default 0) restores it for A/B.
+  - 0x1fbd3010 |= 0x19 now runs automatically on HIR 0xe (parameter
+    zsi2_en_auto, default 1) instead of the 008(b) address parameter.
+  - slic_reset: after the existing SLIC0/bit4 pulses, pulse SYS_RESET
+    bit17 and bit25 with the OEM long delays (parameter
+    reset_oem_bits, default 1).
+  - New parameters: hir_read (default 1), clocksrc_arg1 (default 0,
+    set_gpio_clocksrc argument, semantic still unresolved).
+  - Probe banner shows the 009 switch state.  The detect relaxation
+    (RCN-only gate) already shipped in 005 and is unchanged.
+
+Risks: the HIR window read is kernel-mode like the OEM GET_HIR every
+boot, but the first test on the dev unit must still assume a possible
+watchdog reset (user-space read of this block hung build-15, H-06);
+the reset is recoverable, as before.  SYS_RESET bit25 is the SFC2/PCM
+reset - the OEM pulses it anyway; the PCM stack reinitialises after
+probe.
+
+Acceptance (build-17, layered gate per
+patch009_mapping_and_acceptance_20261029.md):
+  P0: dmesg shows "HIR x" then "Le964%c detected (rcn 08 pcn 49)"
+      instead of "unexpected chip id ff ff".
+  P1: devmem re-snapshot of the HIR-selected clocksrc pair matches the
+      live-machine table (0x1fa20214/0x1fa20218 and 0x1fa201d0
+      families); ZSI_CFG untouched on non-legacy.
+  P2: SWCTRL(0xE7) != 0 after VP-API init, then DEVMODE/CLKSLOTS
+      readback and dial tone.
+
+Signed-off-by: ZN504XG-D voice porting project
+--- a/src/en75xx_zsi.c
++++ b/src/en75xx_zsi.c
+@@ -73,6 +73,10 @@
+ /* OEM SPI_Reset (HIR 0xC/0xE) additionally pulses bit 4 around the
+  * SLIC0 pulse; purpose undocumented, mirrored for fidelity. */
+ #define  SYS_RESET_ZSI_BIT4		BIT(4)
++/* 009: OEM SPI_Reset (HIR 0xC/0xE) double pulse, long delays
++ * (mapping report patch009_mapping_and_acceptance_20261029.md). */
++#define  SYS_RESET_OEM_BIT17		BIT(17)
++#define  SYS_RESET_OEM_BIT25		BIT(25)
+ 
+ /* Chip SCU block (0x1fa20000) */
+ #define SCU_IOMUX_CONTROL1		0x104
+@@ -150,6 +154,20 @@
+ 	"delays, plus a SYS_RESET bit4 pulse (default true)");
+ 
+ /*
++ * 009: OEM SPI_Reset (HIR 0xc/0xe) additionally pulses SYS_RESET
++ * bit17 and bit25 with long delays around the SLIC0 pulse
++ * (a1_spi_ko_diff_report_20261021.md, oem_bringup_disasm_compare
++ * sec.1 step 1).  Bit 25 is documented below as the SFC2/PCM reset;
++ * the OEM pulses it anyway and the PCM stack reinitialises after
++ * probe.
++ */
++static bool zsi_reset_oem_bits = true;
++module_param_named(reset_oem_bits, zsi_reset_oem_bits, bool, 0644);
++MODULE_PARM_DESC(reset_oem_bits,
++	"pulse SYS_RESET bit17 and bit25 after the SLIC0 pulse, like "
++	"OEM SPI_Reset on HIR 0xc/0xe (default true)");
++
++/*
+  * 007: OEM SPI_cfg programs a chip-SCU clock/reset register through
+  * pcmChipScuQuery (a pcm1.ko internal whose register address is not in
+  * spi.ko).  Until the A2 pcm1.ko disassembly lands the exact address,
+@@ -169,69 +187,62 @@
+ 	"bit to set in zsi_scu_clk_en_addr (default 16, the OEM value)");
+ 
+ /*
+- * 008: PCM clock path (build-13 devmem forensics, report
+- * devices/ZN504XG-D/reports/build13_review_report_20261021.md sec. 3.1).
+- * The legacy SCU sequence above programs three chip-SCU (0x1fa20000)
+- * PCM clock registers so the PCM block actually clocks PCLK/FSYNC to
+- * the SLIC; the non-legacy AN7581 path never did and on build-13 all
+- * three read back idle (DIV=0, OUT=0x7fff, SRC_SEL=0).  The chip SCU
+- * has no regmap handle on the non-legacy path, so the writes go
+- * through an ioremap window exactly like the 007 hook.
++ * 009: OEM-order bring-up (report
++ * devices/ZN504XG-D/reports/patch009_mapping_and_acceptance_20261029.md,
++ * cross-checked against the live OEM machine,
++ * newdevice_slic_crosscheck_20261029.md).  The 008 legacy-mirror PCM
++ * clock writes (SCU d4/d8/148) are gone: the live OEM reference runs
++ * PCM fine with all three idle and the OEM non-legacy bring-up never
++ * touches them.  In their place the driver replicates the OEM
++ * set_gpio_clocksrc step: read HIR from the SoC window the OEM GET_HIR
++ * uses (0x1faf0000 + 0x64, kernel mode - a user-space read of this
++ * block returns 0xDEADBEEF poison or hangs, so it can never be a
++ * module parameter default), then apply the chipScuReg record the OEM
++ * table selects for that HIR (0xa -> record 2, 0xc -> record 3,
++ * 0xe -> record 4, anything else -> no record writes at all, exactly
++ * like the OEM gpio_clocksrc_init).
+  */
+-#define ZSI_PCM_CLK_MAP_SIZE		0x200
+-
+-static unsigned long zsi_pcm_clk_base = 0x1fa20000;
+-module_param(zsi_pcm_clk_base, ulong, 0644);
+-MODULE_PARM_DESC(zsi_pcm_clk_base,
+-	"physical base of the chip-SCU block holding the PCM clock "
+-	"registers; 0 disables the 008 writes (default 0x1fa20000)");
+-
+-static unsigned int zsi_pcm_clk_mask = 0x7;
+-module_param(zsi_pcm_clk_mask, uint, 0644);
+-MODULE_PARM_DESC(zsi_pcm_clk_mask,
+-	"bitmask selecting which 008 PCM clock writes run: 1 = SRC_SEL "
+-	"|= zsi_pcm_clk_src_sel_or, 2 = DIV = zsi_pcm_clk_div_val, "
+-	"4 = OUT = zsi_pcm_clk_out_val (default 0x7 = all three)");
+-
+-static unsigned int zsi_pcm_clk_src_sel_or = PCM_CLK_SRC_ZSI;
+-module_param(zsi_pcm_clk_src_sel_or, uint, 0644);
+-MODULE_PARM_DESC(zsi_pcm_clk_src_sel_or,
+-	"value ORed into SCU_PCM_CLK_SRC_SEL (default 0x1c, the legacy "
+-	"ZSI clock source select)");
+-
+-static unsigned int zsi_pcm_clk_div_val = SCU_PCM_CLK_DIV_VAL;
+-module_param(zsi_pcm_clk_div_val, uint, 0644);
+-MODULE_PARM_DESC(zsi_pcm_clk_div_val,
+-	"value written to SCU_PCM_CLK_DIV (default 8, the legacy value)");
+-
+-static unsigned int zsi_pcm_clk_out_val = SCU_PCM_CLK_OUT_VAL;
+-module_param(zsi_pcm_clk_out_val, uint, 0644);
+-MODULE_PARM_DESC(zsi_pcm_clk_out_val,
+-	"value written to SCU_PCM_CLK_OUT (default 0x00a00301, the "
+-	"legacy value)");
++#define ZSI_HIR_MAP_BASE		0x1faf0000
++#define ZSI_HIR_MAP_SIZE		0x1000
++#define ZSI_HIR_REG			0x064
++
++#define ZSI_CLKSCU_MAP_SIZE		0x300
++#define ZSI_CLKSCU_SET_VAL		0x11300
++#define ZSI_CLKSCU_B_OR			0xc00
++
++struct zsi_clkscu_rec {
++	u32 addr_a;	/* RMW: (v & ~mask_a) | (ZSI_CLKSCU_SET_VAL | arg1) */
++	u32 mask_a;
++	u32 addr_b;	/* RMW: v | ZSI_CLKSCU_B_OR */
++};
+ 
+-/*
+- * 008 (b): SYS 0x1fb00094 bit0 reads 1 on this board, which per the
+- * OEM spi.ko SPI_cfg disassembly (a1_spi_ko_diff_report_20261021.md)
+- * selects the 0xbfbd1010 / 0xbfbd3010 branch instead of the chip-SCU
+- * bit16 branch.  0xbfbd1010 |= 0x19 this driver already does (ZSI_EN);
+- * the OEM HIR 0xC sequence additionally does 0xbfbd3010 |= 0x19.
+- * That register sits outside the zsi0 node 0x1000 mapping, so it
+- * ioremaps like the 007 hook.  Off by default: no live OEM reference
+- * exists to arbitrate the branch, so the A/B modules.d experiment
+- * decides whether this write matters.
+- */
+-static unsigned long zsi_zsi2_en_addr;
+-module_param(zsi_zsi2_en_addr, ulong, 0644);
+-MODULE_PARM_DESC(zsi_zsi2_en_addr,
+-	"physical address of the OEM second wrapper-enable register "
+-	"(0x1fbd3010 on the SYS 0x94 bit0=1 branch); 0 (default) skips "
+-	"the write");
+-
+-static unsigned int zsi_zsi2_en_val = ZSI_EN_VAL;
+-module_param(zsi_zsi2_en_val, uint, 0644);
+-MODULE_PARM_DESC(zsi_zsi2_en_val,
+-	"value ORed into zsi_zsi2_en_addr (default 0x19, the OEM value)");
++static bool zsi_hir_read_en = true;
++module_param_named(hir_read, zsi_hir_read_en, bool, 0644);
++MODULE_PARM_DESC(hir_read,
++	"read HIR from 0x1faf0064 in kernel mode like the OEM GET_HIR "
++	"and apply the HIR-selected OEM clocksrc record (default true; "
++	"false skips all 009 clocksrc writes)");
++
++static unsigned int zsi_clocksrc_arg1;
++module_param(clocksrc_arg1, uint, 0644);
++MODULE_PARM_DESC(clocksrc_arg1,
++	"value ORed into the 0x11300 clock-source word of the OEM "
++	"set_gpio_clocksrc write (semantic unresolved in the "
++	"disassembly; default 0)");
++
++static bool zsi_zsi2_en_auto = true;
++module_param_named(zsi2_en_auto, zsi_zsi2_en_auto, bool, 0644);
++MODULE_PARM_DESC(zsi2_en_auto,
++	"on HIR 0xe also enable the second ZSI wrapper "
++	"(0x1fbd3010 |= 0x19, the OEM SPI_cfg dual-wrapper branch; "
++	"default true)");
++
++static bool zsi_cfg_write;
++module_param_named(cfg_write, zsi_cfg_write, bool, 0644);
++MODULE_PARM_DESC(cfg_write,
++	"write ZSI_CFG (0x0f030313) during hw_init on the non-legacy "
++	"path (default false: the OEM modules never write it; the live "
++	"register holds 0x0f030313 without any write)");
+ 
+ /* ------------------------------------------------------------------ */
+ /* Byte level                                                          */
+@@ -393,63 +404,82 @@
+ 	}
+ 
+ 	/*
+-	 * 008: mirror the legacy path's PCM clock programming (above) on
+-	 * the non-legacy path.  Without these the PCM block never clocks
+-	 * PCLK/FSYNC to the SLIC and every chip-id read floats to 0xff -
+-	 * the build-13 devmem snapshot shows all three registers idle.
+-	 * zsi_pcm_clk_mask isolates the writes for the A/B matrix.
++	 * 009: OEM set_gpio_clocksrc, table-driven by the runtime HIR
++	 * (see the parameter block above for the report references).
+ 	 */
+-	if (!zsi->legacy_scu && zsi_pcm_clk_base) {
+-		void __iomem *pcm_clk = ioremap(zsi_pcm_clk_base,
+-						ZSI_PCM_CLK_MAP_SIZE);
+-
+-		if (pcm_clk) {
+-			if (zsi_pcm_clk_mask & 1)
+-				writel(readl(pcm_clk + SCU_PCM_CLK_SRC_SEL) |
+-				       zsi_pcm_clk_src_sel_or,
+-				       pcm_clk + SCU_PCM_CLK_SRC_SEL);
+-			if (zsi_pcm_clk_mask & 2)
+-				writel(zsi_pcm_clk_div_val,
+-				       pcm_clk + SCU_PCM_CLK_DIV);
+-			if (zsi_pcm_clk_mask & 4)
+-				writel(zsi_pcm_clk_out_val,
+-				       pcm_clk + SCU_PCM_CLK_OUT);
+-			iounmap(pcm_clk);
+-			dev_info(zsi->dev,
+-				 "PCM clock SCU: base %pa mask 0x%x (src|0x%x, div 0x%x, out 0x%x)\n",
+-				 &zsi_pcm_clk_base, zsi_pcm_clk_mask,
+-				 zsi_pcm_clk_src_sel_or, zsi_pcm_clk_div_val,
+-				 zsi_pcm_clk_out_val);
++	if (!zsi->legacy_scu && zsi_hir_read_en) {
++		void __iomem *hir = ioremap(ZSI_HIR_MAP_BASE, ZSI_HIR_MAP_SIZE);
++		unsigned int h = 0;
++
++		if (hir) {
++			h = readl(hir + ZSI_HIR_REG) >> 16;
++			iounmap(hir);
+ 		} else {
+-			dev_warn(zsi->dev,
+-				 "PCM clock SCU ioremap(0x%08lx) failed\n",
+-				 zsi_pcm_clk_base);
++			dev_warn(zsi->dev, "HIR ioremap(0x%08x) failed\n",
++				 ZSI_HIR_MAP_BASE);
+ 		}
+-	}
++		dev_info(zsi->dev, "HIR %x\n", h);
+ 
+-	/*
+-	 * 008 (b): OEM SPI_cfg on the SYS 0x94 bit0=1 branch also enables
+-	 * the second ZSI wrapper block (0x1fbd3010 |= 0x19).  Off by
+-	 * default; the A/B modules.d experiment arbitrates the branch.
+-	 */
+-	if (!zsi->legacy_scu && zsi_zsi2_en_addr) {
+-		void __iomem *zsi2_en = ioremap(zsi_zsi2_en_addr, 4);
+-
+-		if (zsi2_en) {
+-			writel(readl(zsi2_en) | zsi_zsi2_en_val, zsi2_en);
+-			iounmap(zsi2_en);
+-			dev_info(zsi->dev,
+-				 "OEM second ZSI en: %pa |= 0x%x\n",
+-				 &zsi_zsi2_en_addr, zsi_zsi2_en_val);
++		if (h == 0xa || h == 0xc || h == 0xe) {
++			static const struct zsi_clkscu_rec rec[3] = {
++				[0] = { 0x1fa20214, 0x1ff3300, 0x1fa201cc }, /* 0xa */
++				[1] = { 0x1fa20214, 0x3f3300,  0x1fa201d0 }, /* 0xc */
++				[2] = { 0x1fa20218, 0x3f3300,  0x1fa201d0 }, /* 0xe */
++			};
++			const struct zsi_clkscu_rec *r = &rec[(h - 0xa) / 2];
++			void __iomem *scu = ioremap(0x1fa20000,
++						    ZSI_CLKSCU_MAP_SIZE);
++
++			if (scu) {
++				writel((readl(scu + (r->addr_a - 0x1fa20000)) &
++					~r->mask_a) |
++				       (ZSI_CLKSCU_SET_VAL | zsi_clocksrc_arg1),
++				       scu + (r->addr_a - 0x1fa20000));
++				writel(readl(scu + (r->addr_b - 0x1fa20000)) |
++				       ZSI_CLKSCU_B_OR,
++				       scu + (r->addr_b - 0x1fa20000));
++				iounmap(scu);
++				dev_info(zsi->dev,
++					 "OEM clocksrc: %x=(v&~0x%x)|0x%x, %x|=0x%x (HIR %x)\n",
++					 r->addr_a, r->mask_a,
++					 ZSI_CLKSCU_SET_VAL | zsi_clocksrc_arg1,
++					 r->addr_b, ZSI_CLKSCU_B_OR, h);
++			} else {
++				dev_warn(zsi->dev,
++					 "clocksrc ioremap(0x1fa20000) failed\n");
++			}
+ 		} else {
+-			dev_warn(zsi->dev,
+-				 "second ZSI en ioremap(0x%08lx) failed\n",
+-				 zsi_zsi2_en_addr);
++			dev_info(zsi->dev,
++				 "HIR %x not in {a,c,e}: OEM writes no chipScuReg record\n",
++				 h);
++		}
++
++		/*
++		 * HIR 0xe: OEM SPI_cfg additionally enables the second ZSI
++		 * wrapper (0x1fbd3010 |= 0x19).  Outside the zsi0 node
++		 * mapping, so it ioremaps like the 007 hook.  User-space
++		 * reads of this block return 0xDEADBEEF poison on the live
++		 * machine; only the kernel write matters.
++		 */
++		if (h == 0xe && zsi_zsi2_en_auto) {
++			void __iomem *zsi2 = ioremap(0x1fbd3010, 4);
++
++			if (zsi2) {
++				writel(readl(zsi2) | ZSI_EN_VAL, zsi2);
++				iounmap(zsi2);
++				dev_info(zsi->dev,
++					 "OEM second ZSI en: 0x1fbd3010 |= 0x%x (HIR e)\n",
++					 ZSI_EN_VAL);
++			} else {
++				dev_warn(zsi->dev,
++					 "second ZSI en ioremap(0x1fbd3010) failed\n");
++			}
+ 		}
+ 	}
+ 
+ 	/* wrapper config + enable */
+-	writel(ZSI_CFG_VAL, zsi->base + ZSI_CFG);
++	if (zsi->legacy_scu || zsi_cfg_write)
++		writel(ZSI_CFG_VAL, zsi->base + ZSI_CFG);
+ 	writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL, zsi->base + ZSI_EN);
+ 
+ 	zsi->hw_ready = true;
+@@ -538,6 +568,21 @@
+ 				regmap_update_bits(zsi->scu_map, SYS_RESET,
+ 						   SYS_RESET_ZSI_BIT4, 0);
+ 			}
++			if (zsi_reset_oem_bits) {
++				/* 009: OEM SPI_Reset bit17/bit25 double pulse. */
++				regmap_update_bits(zsi->scu_map, SYS_RESET,
++						   SYS_RESET_OEM_BIT17, SYS_RESET_OEM_BIT17);
++				msleep(5);
++				regmap_update_bits(zsi->scu_map, SYS_RESET,
++						   SYS_RESET_OEM_BIT17, 0);
++				msleep(20);
++				regmap_update_bits(zsi->scu_map, SYS_RESET,
++						   SYS_RESET_OEM_BIT25, SYS_RESET_OEM_BIT25);
++				msleep(5);
++				regmap_update_bits(zsi->scu_map, SYS_RESET,
++						   SYS_RESET_OEM_BIT25, 0);
++				msleep(20);
++			}
+ 		}
+ 		return 0;
+ 	}
+@@ -795,9 +840,10 @@
+ 
+ 	platform_set_drvdata(pdev, zsi);
+ 	dev_info(dev,
+-		 "ZSI transport ready (gap %u us, cs %u, tx_prep %d, mode_dance %d, pcm_clk 0x%lx/0x%x, zsi2_en 0x%lx%s)\n",
++		 "ZSI transport ready (gap %u us, cs %u, tx_prep %d, mode_dance %d, hir_read %d, zsi2_auto %d, oem_reset_bits %d, cfg_write %d%s)\n",
+ 		 zsi->gap_us, zsi->cs, zsi->tx_prep, zsi->reset_mode_dance,
+-		 zsi_pcm_clk_base, zsi_pcm_clk_mask, zsi_zsi2_en_addr,
++		 zsi_hir_read_en, zsi_zsi2_en_auto, zsi_reset_oem_bits,
++		 zsi_cfg_write,
+ 		 zsi->legacy_scu ? ", legacy SCU" : "");
+ 
+ 	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
