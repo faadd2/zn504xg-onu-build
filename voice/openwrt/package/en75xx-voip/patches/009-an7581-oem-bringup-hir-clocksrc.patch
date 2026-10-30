@@ -202,8 +202,8 @@ Signed-off-by: ZN504XG-D voice porting project
 +	"false skips all 009 clocksrc writes)");
 +
 +static unsigned int zsi_clocksrc_arg1;
-+module_param(clocksrc_arg1, uint, 0644);
-+MODULE_PARM_DESC(clocksrc_arg1,
++module_param(zsi_clocksrc_arg1, uint, 0644);
++MODULE_PARM_DESC(zsi_clocksrc_arg1,
 +	"value ORed into the 0x11300 clock-source word of the OEM "
 +	"set_gpio_clocksrc write (semantic unresolved in the "
 +	"disassembly; default 0)");
