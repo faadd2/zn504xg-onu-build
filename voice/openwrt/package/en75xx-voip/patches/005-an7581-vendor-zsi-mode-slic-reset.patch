@@ -43,9 +43,8 @@ next candidate is the 201-06 documented fallback (zsi pinctrl-0 ->
 Signed-off-by: ZN504XG-D voice porting project
 diff --git a/src/en75xx_slic_le9642.c b/src/en75xx_slic_le9642.c
 index 35bfe5b..65d39a3 100644
-diff -ruN tmp_pref005_src/en75xx_slic_le9642.c tmp_pcheck/src/en75xx_slic_le9642.c
---- a/en75xx_slic_le9642.c	2026-10-20 14:25:28.866690200 +0800
-+++ b/src/en75xx_slic_le9642.c	2026-10-20 14:27:31.156522400 +0800
+--- a/src/en75xx_slic_le9642.c
++++ b/src/en75xx_slic_le9642.c
 @@ -335,13 +335,22 @@
  	slic->rcn = id[0];
  	slic->pcn = id[1];
@@ -71,9 +70,9 @@ diff -ruN tmp_pref005_src/en75xx_slic_le9642.c tmp_pcheck/src/en75xx_slic_le9642
  	dev_info(slic->dev, "Le964%c detected (rcn %02x pcn %02x)\n",
  		 id[1] == VP886_PCN_LE9642 ? '2' : '1', id[0], id[1]);
  	return 0;
-diff -ruN tmp_pref005_src/en75xx_zsi.c tmp_pcheck/src/en75xx_zsi.c
---- a/en75xx_zsi.c	2026-10-20 14:25:28.868670000 +0800
-+++ b/src/en75xx_zsi.c	2026-10-20 14:27:31.154519400 +0800
+diff --git a/src/en75xx_zsi.c b/src/en75xx_zsi.c
+--- a/src/en75xx_zsi.c
++++ b/src/en75xx_zsi.c
 @@ -88,6 +88,7 @@
  	struct reset_control	*rst;
  	struct en75xx_scu	sys;
