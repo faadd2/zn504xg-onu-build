@@ -1,71 +1,104 @@
-AN7581: OEM-order bring-up with runtime HIR record selection (009).
+AN7581: static-HIR record selection with self-evidence readbacks (010).
 
-build-13/build-15 exhausted the register-layer hypotheses (006
-transaction plumbing, 007 clk-en, 008 legacy-mirror PCM clock writes):
-every variant still floats the chip-id read to 0xff.  The 10-29
-live-machine cross-check (a second, factory-firmware unit, reports
-devices/ZN504XG-D/reports/newdevice_slic_crosscheck_20261029.md and
-patch009_mapping_and_acceptance_20261029.md) then corrected the model:
+Design: devices/ZN504XG-D/reports/patch010_design_20261030.md (user-approved
+2026-10-30 22:43).  This patch REPLACES 009: the runtime HIR read
+(readl(0x1faf0064)) that 009 introduced hangs the old unit's SoC bus in
+kernel mode mid-boot - the build-18 boot loop, evidenced by serial log
+(the "HIR %x" print never appears before the watchdog reset; H-24).
+The OEM-order bring-up itself is unchanged; only the record selection
+becomes static by default and the dangerous read becomes opt-in.
 
-  - the OEM non-legacy bring-up never touches the legacy SCU d4/d8/148
-    PCM clock registers - on the live machine all three sit at their
-    idle defaults while PCM1 runs - so the 008 writes are deleted;
-  - the OEM set_gpio_clocksrc step is table-driven by HIR, read at
-    runtime from the SoC window OEM GET_HIR uses (0x1faf0000 + 0x64);
-    user-space reads of that block return 0xDEADBEEF poison (or hang
-    the older kernel), which is why the HIR default can never come
-    from userspace forensics - the driver must read it in kernel mode
-    exactly like the OEM;
-  - ZSI_CFG holds 0x0f030313 on the live machine without any OEM
-    write, so the unconditional ZSI_CFG write is dropped on the
-    non-legacy path (cfg_write=1 brings it back for A/B);
-  - HIR 0xe additionally enables the second ZSI wrapper
-    (0x1fbd3010 |= 0x19, OEM SPI_cfg dual-wrapper branch), now
-    automatic instead of the 008(b) off-by-default parameter;
-  - OEM SPI_Reset pulses SYS_RESET bit17 and bit25 around the SLIC0
-    pulse on HIR 0xc/0xe.
+Changes (en75xx_zsi.c, non-legacy path, plus en75xx_slic_le9642.c):
 
-Changes (all in en75xx_zsi.c, non-legacy path only):
+  - hir_read default flips 1 -> 0 and the parameter description now
+    carries the old-unit hazard; hir_read=1 keeps the OEM runtime GET_HIR
+    read for the NEW unit only.
+  - New parameter hir_record (uint, default 0xe): static record group
+    0xa/0xc/0xe = record 2/3/4, 0 = no chipScuReg record.  Used whenever
+    hir_read=0, so the old unit applies the live-machine signature
+    record without touching the poison window.
+  - New parameter clkscu_rb (default 1): after the OEM record RMW the
+    driver reads both clocksrc registers back and prints them - the P1
+    acceptance evidence lands in dmesg, no devmem needed (0x1fa2xxxx
+    is a safe read region).
+  - New parameter slic_probe_dump (default 1) in the slic driver: after
+    the VP-API init path completes it reads SWCTRL(0xe7)/DEVMODE/
+    CLKSLOTS/TXSLOT/RXSLOT and prints them - the P2 acceptance evidence
+    (OEM targets DEVMODE=14 00 / CLKSLOTS=46 / TX=03 / RX=04).
+  - Probe banner now also reports hir_record and clkscu_rb.
+  - reset_oem_bits / zsi2_en_auto / cfg_write / clocksrc_arg1 carry over
+    from 009 unchanged (defaults 1/1/0/0).
 
-  - hw_init: read HIR = readl(0x1faf0064) >> 16 via a fresh ioremap,
-    log it, and apply the chipScuReg record the OEM table selects:
-    HIR 0xa -> 0x1fa20214 RMW (mask 0x1ff3300, set 0x11300|arg1) +
-    0x1fa201cc |= 0xc00; HIR 0xc -> same on 0x1fa20214/0x3f3300 +
-    0x1fa201d0 |= 0xc00; HIR 0xe -> 0x1fa20218/0x3f3300 +
-    0x1fa201d0 |= 0xc00; any other HIR -> no record writes at all,
-    matching the OEM gpio_clocksrc_init branch structure.
-  - Delete the 008 legacy-mirror PCM clock writes (SCU d4/d8/148) and
-    their parameters.
-  - Delete the unconditional ZSI_CFG write on the non-legacy path;
-    new module parameter cfg_write (default 0) restores it for A/B.
-  - 0x1fbd3010 |= 0x19 now runs automatically on HIR 0xe (parameter
-    zsi2_en_auto, default 1) instead of the 008(b) address parameter.
-  - slic_reset: after the existing SLIC0/bit4 pulses, pulse SYS_RESET
-    bit17 and bit25 with the OEM long delays (parameter
-    reset_oem_bits, default 1).
-  - New parameters: hir_read (default 1), clocksrc_arg1 (default 0,
-    set_gpio_clocksrc argument, semantic still unresolved).
-  - Probe banner shows the 009 switch state.  The detect relaxation
-    (RCN-only gate) already shipped in 005 and is unchanged.
+Defaults make the old unit boot unmodified; every A/B axis is a runtime
+module parameter, so one build runs the whole verification matrix.
 
-Risks: the HIR window read is kernel-mode like the OEM GET_HIR every
-boot, but the first test on the dev unit must still assume a possible
-watchdog reset (user-space read of this block hung build-15, H-06);
-the reset is recoverable, as before.  SYS_RESET bit25 is the SFC2/PCM
-reset - the OEM pulses it anyway; the PCM stack reinitialises after
-probe.
+Risks: hir_read=1 on the old unit reproduces the build-18 boot loop by
+design - never set it there.  reset_oem_bits=1 (SYS_RESET bit17/25 OEM
+pulses) is still untested on the old unit (build-18 died earlier at the
+HIR read); if P0 fails, A/B it first with reset_oem_bits=0.
 
-Acceptance (build-17, layered gate per
-patch009_mapping_and_acceptance_20261029.md):
-  P0: dmesg shows "HIR x" then "Le964%c detected (rcn 08 pcn 49)"
-      instead of "unexpected chip id ff ff".
-  P1: devmem re-snapshot of the HIR-selected clocksrc pair matches the
-      live-machine table (0x1fa20214/0x1fa20218 and 0x1fa201d0
-      families); ZSI_CFG untouched on non-legacy.
-  P2: SWCTRL(0xE7) != 0 after VP-API init, then DEVMODE/CLKSLOTS
-      readback and dial tone.
+Acceptance (build-19, layered gate, serial console mandatory):
+  P0: dmesg shows "ZSI transport ready ( ... hir_read 0, hir_record e ...)"
+      then "Le964%c detected (rcn 08 pcn 49)" instead of "unexpected chip
+      id ff ff".  Sentinel: the literal "HIR " banner must NOT appear.
+  P1: "clkscu readback" line matches the live-machine table families
+      (0x1fa20214/0x1fa20218 and 0x1fa201d0/0x1fa201cc).
+  P2: "SLIC probe dump" line shows SWCTRL != 0 and the OEM target values,
+      then dial tone on the FXS port.
 
 Signed-off-by: ZN504XG-D voice porting project
+diff -Naur base/src/en75xx_slic_le9642.c b010/src/en75xx_slic_le9642.c
+--- a/src/en75xx_slic_le9642.c
++++ b/src/en75xx_slic_le9642.c
+@@ -254,6 +254,13 @@
+ module_param(bus_slot, int, 0644);
+ MODULE_PARM_DESC(bus_slot, "override airoha,bus-slots[0] (-1 = device tree, 0..31 = override)");
+ 
++static bool slic_probe_dump = true;
++module_param(slic_probe_dump, bool, 0644);
++MODULE_PARM_DESC(slic_probe_dump,
++	"after VP-API init read back SWCTRL/DEVMODE/CLKSLOTS/TX/RXSLOT "
++	"and print them (P2 self-evidence vs the OEM bring-up targets; "
++	"default true)");
++
+ /* ------------------------------------------------------------------ */
+ /* MPI helpers                                                         */
+ /* ------------------------------------------------------------------ */
+@@ -750,6 +757,33 @@
+ 			return ret;
+ 	}
+ 
++	if (slic_probe_dump) {
++		u8 rb[5];
++
++		/*
++		 * 010: P2 self-evidence - read back the VP-API state the
++		 * OEM bring-up is judged against (SWCTRL/DEVMODE/CLKSLOTS/
++		 * TX/RXSLOT; see patch009_mapping_and_acceptance_20261029.md
++		 * and patch010_design_20261030.md).
++		 */
++		if (!en75xx_zsi_read_reg(slic->zsi, VP886_EC_1,
++					 VP886_R_SWCTRL_WRT + 1, rb, 1) &&
++		    !en75xx_zsi_read_reg(slic->zsi, VP886_EC_1,
++					  VP886_R_DEVMODE_RD, rb + 1, 1) &&
++		    !en75xx_zsi_read_reg(slic->zsi, VP886_EC_1,
++					  VP886_R_CLKSLOTS_RD, rb + 2, 1) &&
++		    !en75xx_zsi_read_reg(slic->zsi, VP886_EC_1,
++					  VP886_R_TXSLOT_RD, rb + 3, 1) &&
++		    !en75xx_zsi_read_reg(slic->zsi, VP886_EC_1,
++					  VP886_R_RXSLOT_RD, rb + 4, 1))
++			dev_info(slic->dev,
++				 "SLIC probe dump: SWCTRL=%02x DEVMODE=%02x CLKSLOTS=%02x TXSLOT=%02x RXSLOT=%02x\n",
++				 rb[0], rb[1], rb[2], rb[3], rb[4]);
++		else
++			dev_warn(slic->dev,
++				 "probe_dump: VP-API register read failed\n");
++	}
++
+ 	return 0;
+ }
+ 
+diff -Naur base/src/en75xx_zsi.c b010/src/en75xx_zsi.c
 --- a/src/en75xx_zsi.c
 +++ b/src/en75xx_zsi.c
 @@ -73,6 +73,10 @@
@@ -100,7 +133,7 @@ Signed-off-by: ZN504XG-D voice porting project
   * 007: OEM SPI_cfg programs a chip-SCU clock/reset register through
   * pcmChipScuQuery (a pcm1.ko internal whose register address is not in
   * spi.ko).  Until the A2 pcm1.ko disassembly lands the exact address,
-@@ -169,69 +187,62 @@
+@@ -169,69 +187,76 @@
  	"bit to set in zsi_scu_clk_en_addr (default 16, the OEM value)");
  
  /*
@@ -112,20 +145,18 @@ Signed-off-by: ZN504XG-D voice porting project
 - * three read back idle (DIV=0, OUT=0x7fff, SRC_SEL=0).  The chip SCU
 - * has no regmap handle on the non-legacy path, so the writes go
 - * through an ioremap window exactly like the 007 hook.
-+ * 009: OEM-order bring-up (report
-+ * devices/ZN504XG-D/reports/patch009_mapping_and_acceptance_20261029.md,
-+ * cross-checked against the live OEM machine,
-+ * newdevice_slic_crosscheck_20261029.md).  The 008 legacy-mirror PCM
-+ * clock writes (SCU d4/d8/148) are gone: the live OEM reference runs
-+ * PCM fine with all three idle and the OEM non-legacy bring-up never
-+ * touches them.  In their place the driver replicates the OEM
-+ * set_gpio_clocksrc step: read HIR from the SoC window the OEM GET_HIR
-+ * uses (0x1faf0000 + 0x64, kernel mode - a user-space read of this
-+ * block returns 0xDEADBEEF poison or hangs, so it can never be a
-+ * module parameter default), then apply the chipScuReg record the OEM
-+ * table selects for that HIR (0xa -> record 2, 0xc -> record 3,
-+ * 0xe -> record 4, anything else -> no record writes at all, exactly
-+ * like the OEM gpio_clocksrc_init).
++ * 010: OEM-order bring-up, static-HIR correction of 009 (design
++ * devices/ZN504XG-D/reports/patch010_design_20261030.md; boot-loop
++ * evidence H-24).  The 008 legacy-mirror PCM clock writes (SCU
++ * d4/d8/148) stay deleted (the live OEM reference runs PCM fine with
++ * all three idle).  The driver still replicates the OEM
++ * set_gpio_clocksrc step, but the record selection no longer defaults
++ * to the runtime GET_HIR read: on the old unit a kernel-mode read of
++ * the 0x1faf0064 window hangs the SoC bus mid-boot (watchdog reset
++ * loop, build-18/H-24).  The default hir_read=0 therefore selects
++ * the record statically from hir_record (default 0xe, the
++ * live-machine signature prior); hir_read=1 restores the OEM runtime
++ * read for the new unit only.
   */
 -#define ZSI_PCM_CLK_MAP_SIZE		0x200
 -
@@ -194,12 +225,28 @@ Signed-off-by: ZN504XG-D voice porting project
 -module_param(zsi_zsi2_en_val, uint, 0644);
 -MODULE_PARM_DESC(zsi_zsi2_en_val,
 -	"value ORed into zsi_zsi2_en_addr (default 0x19, the OEM value)");
-+static bool zsi_hir_read_en = true;
++static bool zsi_hir_read_en;
 +module_param_named(hir_read, zsi_hir_read_en, bool, 0644);
 +MODULE_PARM_DESC(hir_read,
 +	"read HIR from 0x1faf0064 in kernel mode like the OEM GET_HIR "
-+	"and apply the HIR-selected OEM clocksrc record (default true; "
-+	"false skips all 009 clocksrc writes)");
++	"and apply the HIR-selected OEM clocksrc record.  DANGEROUS on "
++	"the old unit: that window hangs the SoC bus in kernel mode "
++	"(build-18 boot loop, H-24).  Only the new unit (OEM GET_HIR "
++	"works there) may set hir_read=1; default false = static "
++	"hir_record selection");
++
++static unsigned int zsi_hir_record = 0xe;
++module_param_named(hir_record, zsi_hir_record, uint, 0644);
++MODULE_PARM_DESC(hir_record,
++	"static OEM clocksrc record group used when hir_read=0: "
++	"0xa/0xc/0xe select record 2/3/4, 0 writes no chipScuReg "
++	"record (default 0xe, the live-machine signature prior)");
++
++static bool zsi_clkscu_rb = true;
++module_param_named(clkscu_rb, zsi_clkscu_rb, bool, 0644);
++MODULE_PARM_DESC(clkscu_rb,
++	"read back the two clocksrc registers after the OEM record "
++	"write and print them (P1 self-evidence; default true)");
 +
 +static unsigned int zsi_clocksrc_arg1;
 +module_param(zsi_clocksrc_arg1, uint, 0644);
@@ -224,7 +271,7 @@ Signed-off-by: ZN504XG-D voice porting project
  
  /* ------------------------------------------------------------------ */
  /* Byte level                                                          */
-@@ -393,63 +404,82 @@
+@@ -393,63 +418,99 @@
  	}
  
  	/*
@@ -233,8 +280,11 @@ Signed-off-by: ZN504XG-D voice porting project
 -	 * PCLK/FSYNC to the SLIC and every chip-id read floats to 0xff -
 -	 * the build-13 devmem snapshot shows all three registers idle.
 -	 * zsi_pcm_clk_mask isolates the writes for the A/B matrix.
-+	 * 009: OEM set_gpio_clocksrc, table-driven by the runtime HIR
-+	 * (see the parameter block above for the report references).
++	 * 010: OEM set_gpio_clocksrc, table-driven.  hir_read=1
++	 * reproduces the OEM runtime GET_HIR read (0x1faf0064) - ONLY
++	 * safe on the new unit; on the old unit that read hangs the SoC
++	 * bus in kernel mode (build-18 boot loop, H-24).  The default
++	 * hir_read=0 takes the record group from hir_record instead.
  	 */
 -	if (!zsi->legacy_scu && zsi_pcm_clk_base) {
 -		void __iomem *pcm_clk = ioremap(zsi_pcm_clk_base,
@@ -257,22 +307,14 @@ Signed-off-by: ZN504XG-D voice porting project
 -				 &zsi_pcm_clk_base, zsi_pcm_clk_mask,
 -				 zsi_pcm_clk_src_sel_or, zsi_pcm_clk_div_val,
 -				 zsi_pcm_clk_out_val);
-+	if (!zsi->legacy_scu && zsi_hir_read_en) {
-+		void __iomem *hir = ioremap(ZSI_HIR_MAP_BASE, ZSI_HIR_MAP_SIZE);
-+		unsigned int h = 0;
-+
-+		if (hir) {
-+			h = readl(hir + ZSI_HIR_REG) >> 16;
-+			iounmap(hir);
- 		} else {
+-		} else {
 -			dev_warn(zsi->dev,
 -				 "PCM clock SCU ioremap(0x%08lx) failed\n",
 -				 zsi_pcm_clk_base);
-+			dev_warn(zsi->dev, "HIR ioremap(0x%08x) failed\n",
-+				 ZSI_HIR_MAP_BASE);
- 		}
+-		}
 -	}
-+		dev_info(zsi->dev, "HIR %x\n", h);
++	if (!zsi->legacy_scu && (zsi_hir_read_en || zsi_hir_record)) {
++		unsigned int h = zsi_hir_record;
  
 -	/*
 -	 * 008 (b): OEM SPI_cfg on the SYS 0x94 bit0=1 branch also enables
@@ -281,7 +323,20 @@ Signed-off-by: ZN504XG-D voice porting project
 -	 */
 -	if (!zsi->legacy_scu && zsi_zsi2_en_addr) {
 -		void __iomem *zsi2_en = ioremap(zsi_zsi2_en_addr, 4);
--
++		if (zsi_hir_read_en) {
++			void __iomem *hir = ioremap(ZSI_HIR_MAP_BASE,
++						    ZSI_HIR_MAP_SIZE);
++
++			if (hir) {
++				h = readl(hir + ZSI_HIR_REG) >> 16;
++				iounmap(hir);
++			} else {
++				dev_warn(zsi->dev, "HIR ioremap(0x%08x) failed\n",
++					 ZSI_HIR_MAP_BASE);
++			}
++			dev_info(zsi->dev, "HIR %x\n", h);
++		}
+ 
 -		if (zsi2_en) {
 -			writel(readl(zsi2_en) | zsi_zsi2_en_val, zsi2_en);
 -			iounmap(zsi2_en);
@@ -306,6 +361,16 @@ Signed-off-by: ZN504XG-D voice porting project
 +				writel(readl(scu + (r->addr_b - 0x1fa20000)) |
 +				       ZSI_CLKSCU_B_OR,
 +				       scu + (r->addr_b - 0x1fa20000));
++				if (zsi_clkscu_rb) {
++					u32 rb_a = readl(scu +
++							 (r->addr_a - 0x1fa20000));
++					u32 rb_b = readl(scu +
++							 (r->addr_b - 0x1fa20000));
++
++					dev_info(zsi->dev,
++						 "clkscu readback: %x=%08x %x=%08x\n",
++						 r->addr_a, rb_a, r->addr_b, rb_b);
++				}
 +				iounmap(scu);
 +				dev_info(zsi->dev,
 +					 "OEM clocksrc: %x=(v&~0x%x)|0x%x, %x|=0x%x (HIR %x)\n",
@@ -355,7 +420,7 @@ Signed-off-by: ZN504XG-D voice porting project
  	writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL, zsi->base + ZSI_EN);
  
  	zsi->hw_ready = true;
-@@ -538,6 +568,21 @@
+@@ -538,6 +599,21 @@
  				regmap_update_bits(zsi->scu_map, SYS_RESET,
  						   SYS_RESET_ZSI_BIT4, 0);
  			}
@@ -377,16 +442,16 @@ Signed-off-by: ZN504XG-D voice porting project
  		}
  		return 0;
  	}
-@@ -795,9 +840,10 @@
+@@ -795,9 +871,10 @@
  
  	platform_set_drvdata(pdev, zsi);
  	dev_info(dev,
 -		 "ZSI transport ready (gap %u us, cs %u, tx_prep %d, mode_dance %d, pcm_clk 0x%lx/0x%x, zsi2_en 0x%lx%s)\n",
-+		 "ZSI transport ready (gap %u us, cs %u, tx_prep %d, mode_dance %d, hir_read %d, zsi2_auto %d, oem_reset_bits %d, cfg_write %d%s)\n",
++		 "ZSI transport ready (gap %u us, cs %u, tx_prep %d, mode_dance %d, hir_read %d, hir_record %x, clkscu_rb %d, zsi2_auto %d, oem_reset_bits %d, cfg_write %d%s)\n",
  		 zsi->gap_us, zsi->cs, zsi->tx_prep, zsi->reset_mode_dance,
 -		 zsi_pcm_clk_base, zsi_pcm_clk_mask, zsi_zsi2_en_addr,
-+		 zsi_hir_read_en, zsi_zsi2_en_auto, zsi_reset_oem_bits,
-+		 zsi_cfg_write,
++		 zsi_hir_read_en, zsi_hir_record, zsi_clkscu_rb,
++		 zsi_zsi2_en_auto, zsi_reset_oem_bits, zsi_cfg_write,
  		 zsi->legacy_scu ? ", legacy SCU" : "");
  
  	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
