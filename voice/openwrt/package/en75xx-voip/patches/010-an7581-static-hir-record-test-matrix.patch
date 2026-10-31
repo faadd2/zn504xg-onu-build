@@ -30,9 +30,17 @@ Changes (en75xx_zsi.c, non-legacy path, plus en75xx_slic_le9642.c):
     block lacked VP886_R_RXSLOT_RD.  Add the local define
     (0x43, identical to the vendor header) so the P2 probe dump
     compiles.
+  - Revision (build-20 on-machine evidence): zsi2_en_auto now
+    defaults FALSE.  The second-ZSI-wrapper enable touches
+    0x1fbd3010, a poison window of the same family as the HIR
+    read: on the old unit the kernel-mode access hangs the SoC
+    bus right after the clocksrc line (no "OEM second ZSI en"
+    print, then watchdog reset; serial-log reproduced twice).
+    The enable stays available for the new unit (OEM behaviour)
+    via zsi2_en_auto=1.
   - Probe banner now also reports hir_record and clkscu_rb.
-  - reset_oem_bits / zsi2_en_auto / cfg_write / clocksrc_arg1 carry over
-    from 009 unchanged (defaults 1/1/0/0).
+  - reset_oem_bits / cfg_write / clocksrc_arg1 carry over from 009
+    unchanged (defaults 1/0/0); zsi2_en_auto was 1 in 009, now 0.
 
 Defaults make the old unit boot unmodified; every A/B axis is a runtime
 module parameter, so one build runs the whole verification matrix.
@@ -144,7 +152,7 @@ Signed-off-by: ZN504XG-D voice porting project
   * 007: OEM SPI_cfg programs a chip-SCU clock/reset register through
   * pcmChipScuQuery (a pcm1.ko internal whose register address is not in
   * spi.ko).  Until the A2 pcm1.ko disassembly lands the exact address,
-@@ -169,69 +187,76 @@
+@@ -169,69 +187,79 @@
  	"bit to set in zsi_scu_clk_en_addr (default 16, the OEM value)");
  
  /*
@@ -266,12 +274,15 @@ Signed-off-by: ZN504XG-D voice porting project
 +	"set_gpio_clocksrc write (semantic unresolved in the "
 +	"disassembly; default 0)");
 +
-+static bool zsi_zsi2_en_auto = true;
++static bool zsi_zsi2_en_auto;
 +module_param_named(zsi2_en_auto, zsi_zsi2_en_auto, bool, 0644);
 +MODULE_PARM_DESC(zsi2_en_auto,
 +	"on HIR 0xe also enable the second ZSI wrapper "
-+	"(0x1fbd3010 |= 0x19, the OEM SPI_cfg dual-wrapper branch; "
-+	"default true)");
++	"(0x1fbd3010 |= 0x19, the OEM SPI_cfg dual-wrapper branch).  "
++	"DANGEROUS on the old unit: a kernel-mode access to that "
++	"window hangs the SoC bus mid-boot, same poison-window "
++	"family as the HIR read (build-20 serial evidence).  New "
++	"unit only; default false");
 +
 +static bool zsi_cfg_write;
 +module_param_named(cfg_write, zsi_cfg_write, bool, 0644);
@@ -282,7 +293,7 @@ Signed-off-by: ZN504XG-D voice porting project
  
  /* ------------------------------------------------------------------ */
  /* Byte level                                                          */
-@@ -393,63 +418,99 @@
+@@ -393,63 +421,104 @@
  	}
  
  	/*
@@ -406,7 +417,12 @@ Signed-off-by: ZN504XG-D voice porting project
 +		 * wrapper (0x1fbd3010 |= 0x19).  Outside the zsi0 node
 +		 * mapping, so it ioremaps like the 007 hook.  User-space
 +		 * reads of this block return 0xDEADBEEF poison on the live
-+		 * machine; only the kernel write matters.
++		 * machine; only the kernel write matters there.  On the OLD
++		 * unit even a kernel-mode access hangs the SoC bus mid-boot
++		 * (build-20 serial evidence: no "OEM second ZSI en" print,
++		 * watchdog reset right after the clocksrc line) - same
++		 * poison-window family as the HIR read, so this stays
++		 * opt-in (zsi2_en_auto, default false).
 +		 */
 +		if (h == 0xe && zsi_zsi2_en_auto) {
 +			void __iomem *zsi2 = ioremap(0x1fbd3010, 4);
@@ -431,7 +447,7 @@ Signed-off-by: ZN504XG-D voice porting project
  	writel(readl(zsi->base + ZSI_EN) | ZSI_EN_VAL, zsi->base + ZSI_EN);
  
  	zsi->hw_ready = true;
-@@ -538,6 +599,21 @@
+@@ -538,6 +607,21 @@
  				regmap_update_bits(zsi->scu_map, SYS_RESET,
  						   SYS_RESET_ZSI_BIT4, 0);
  			}
@@ -453,7 +469,7 @@ Signed-off-by: ZN504XG-D voice porting project
  		}
  		return 0;
  	}
-@@ -795,9 +871,10 @@
+@@ -795,9 +879,10 @@
  
  	platform_set_drvdata(pdev, zsi);
  	dev_info(dev,
