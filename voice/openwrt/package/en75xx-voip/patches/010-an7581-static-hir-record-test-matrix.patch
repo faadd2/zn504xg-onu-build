@@ -52,8 +52,8 @@ Acceptance (build-19, layered gate, serial console mandatory):
       then dial tone on the FXS port.
 
 Signed-off-by: ZN504XG-D voice porting project
---- "base\\src/en75xx_slic_le9642.c"	2026-10-30 22:55:13.142801300 +0800
-+++ "b010\\src/en75xx_slic_le9642.c"	2026-10-31 12:26:18.746569400 +0800
+--- a/src/en75xx_slic_le9642.c
++++ b/src/en75xx_slic_le9642.c
 @@ -50,6 +50,7 @@
  #define VP886_R_TXSLOT_WRT		0x40
  #define VP886_R_TXSLOT_RD		0x41
@@ -110,8 +110,8 @@ Signed-off-by: ZN504XG-D voice porting project
  	return 0;
  }
  
---- "base\\src/en75xx_zsi.c"	2026-10-30 23:04:41.628533300 +0800
-+++ "b010\\src/en75xx_zsi.c"	2026-10-30 23:08:42.297701100 +0800
+--- a/src/en75xx_zsi.c
++++ b/src/en75xx_zsi.c
 @@ -73,6 +73,10 @@
  /* OEM SPI_Reset (HIR 0xC/0xE) additionally pulses bit 4 around the
   * SLIC0 pulse; purpose undocumented, mirrored for fidelity. */
