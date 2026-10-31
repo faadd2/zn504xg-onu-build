@@ -1,0 +1,111 @@
+name: patch-zsi-param
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: '产出固件的那次 run id（地址栏 runs/ 后面的数字）'
+        required: true
+        default: '41181335502'
+      artifact:
+        description: '固件 artifact 名'
+        required: true
+        default: 'ponwrt-an7581-onu-suite-27'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - run: sudo apt-get update && sudo apt-get install -y squashfs-tools u-boot-tools
+
+      - name: 解包/改参数/重打 FIT
+        run: |
+          set -eux
+          ls -la
+          # 附件里是 zip 包（build.yml Pack 步打的），先解
+          unzip -o -q ./*-images.zip -d images
+          # 按名字精确选 zn504xg-d 的 sysupgrade，绝不 head -1 碰运气
+          ITB=$(find images -type f -name '*zn504xg*sysupgrade*.itb' | head -1)
+          [ -n "$ITB" ] || { echo 'ERROR: 附件里没找到 zn504xg-d 的 sysupgrade.itb'; exit 1; }
+          echo "使用固件: $ITB"
+
+          dumpimage -T fit -p 0 -o kernel.bin  "$ITB"
+          dumpimage -T fit -p 1 -o fdt.bin     "$ITB"
+          dumpimage -T fit -p 2 -o rootfs.bin "$ITB"
+          unsquashfs -d rootfs rootfs.bin
+
+          echo '===== modules.d 原始内容（这段回贴给我）====='
+          ls rootfs/etc/modules.d/
+          grep -H . rootfs/etc/modules.d/*en75xx* || true
+
+          # 改参数：按"内容"找到已有 en75xx-zsi 行就改原行，找不到才新建
+          target=''
+          for f in rootfs/etc/modules.d/*; do
+            if grep -q '^en75xx-zsi' "$f" 2>/dev/null; then target="$f"; break; fi
+          done
+          if [ -n "$target" ]; then
+            sed -i 's/^en75xx-zsi.*/en75xx-zsi zsi2_en_auto=0/' "$target"
+          else
+            printf 'en75xx-zsi zsi2_en_auto=0\n' > rootfs/etc/modules.d/51-en75xx-zsi
+          fi
+          echo '===== 改后内容 ====='
+          grep -H . rootfs/etc/modules.d/*en75xx* || true
+
+          mksquashfs rootfs rootfs.new.bin -comp xz -b 256k -noappend
+          cat > fit.its <<'EOF'
+          /dts-v1/;
+          / {
+            description = "ARM64 OpenWrt FIT";
+            #address-cells = <1>;
+            images {
+              kernel-1 {
+                description = "ARM64 OpenWrt Linux-6.18.55";
+                data = /incbin/("kernel.bin");
+                type = "kernel"; arch = "arm64"; os = "linux"; compression = "gzip";
+                load = <0x8a000000>; entry = <0x8a000000>;
+                hash-1 { algo = "crc32"; };
+                hash-2 { algo = "sha1"; };
+              };
+              fdt-1 {
+                description = "ARM64 OpenWrt znxt_zn504xg-d device tree blob";
+                data = /incbin/("fdt.bin");
+                type = "flat_dt"; arch = "arm64"; compression = "none";
+                hash-1 { algo = "crc32"; };
+                hash-2 { algo = "sha1"; };
+              };
+              rootfs-1 {
+                description = "ARM64 OpenWrt znxt_zn504xg-d rootfs";
+                data = /incbin/("rootfs.new.bin");
+                type = "filesystem"; arch = "arm64"; compression = "none";
+                hash-1 { algo = "crc32"; };
+                hash-2 { algo = "sha1"; };
+              };
+            };
+            configurations {
+              default = "config-1";
+              config-1 {
+                description = "OpenWrt znxt_zn504xg-d";
+                kernel = "kernel-1";
+                fdt = "fdt-1";
+                loadables = "rootfs-1";
+              };
+            };
+          };
+          EOF
+          mkimage -f fit.its "patched-$(basename "$ITB")"
+          ls -la patched-*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patched-${{ inputs.artifact }}
+          path: patched-*.itb
