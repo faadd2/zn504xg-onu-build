@@ -25,6 +25,11 @@ Changes (en75xx_zsi.c, non-legacy path, plus en75xx_slic_le9642.c):
     the VP-API init path completes it reads SWCTRL(0xe7)/DEVMODE/
     CLKSLOTS/TXSLOT/RXSLOT and prints them - the P2 acceptance evidence
     (OEM targets DEVMODE=14 00 / CLKSLOTS=46 / TX=03 / RX=04).
+  - Compile fix (build-19): the slic compilation unit never
+    includes the vendor vp886_registers.h; the local MPI opcode
+    block lacked VP886_R_RXSLOT_RD.  Add the local define
+    (0x43, identical to the vendor header) so the P2 probe dump
+    compiles.
   - Probe banner now also reports hir_record and clkscu_rb.
   - reset_oem_bits / zsi2_en_auto / cfg_write / clocksrc_arg1 carry over
     from 009 unchanged (defaults 1/1/0/0).
@@ -47,10 +52,17 @@ Acceptance (build-19, layered gate, serial console mandatory):
       then dial tone on the FXS port.
 
 Signed-off-by: ZN504XG-D voice porting project
-diff -Naur base/src/en75xx_slic_le9642.c b010/src/en75xx_slic_le9642.c
---- a/src/en75xx_slic_le9642.c
-+++ b/src/en75xx_slic_le9642.c
-@@ -254,6 +254,13 @@
+--- "base\\src/en75xx_slic_le9642.c"	2026-10-30 22:55:13.142801300 +0800
++++ "b010\\src/en75xx_slic_le9642.c"	2026-10-31 12:26:18.746569400 +0800
+@@ -50,6 +50,7 @@
+ #define VP886_R_TXSLOT_WRT		0x40
+ #define VP886_R_TXSLOT_RD		0x41
+ #define VP886_R_RXSLOT_WRT		0x42
++#define VP886_R_RXSLOT_RD		0x43
+ #define VP886_R_CLKSLOTS_WRT		0x44
+ #define VP886_R_CLKSLOTS_RD		0x45
+ #define VP886_R_SIGREG_RD		0x4d	/* no update latch */
+@@ -254,6 +255,13 @@
  module_param(bus_slot, int, 0644);
  MODULE_PARM_DESC(bus_slot, "override airoha,bus-slots[0] (-1 = device tree, 0..31 = override)");
  
@@ -64,7 +76,7 @@ diff -Naur base/src/en75xx_slic_le9642.c b010/src/en75xx_slic_le9642.c
  /* ------------------------------------------------------------------ */
  /* MPI helpers                                                         */
  /* ------------------------------------------------------------------ */
-@@ -750,6 +757,33 @@
+@@ -750,6 +758,33 @@
  			return ret;
  	}
  
@@ -98,9 +110,8 @@ diff -Naur base/src/en75xx_slic_le9642.c b010/src/en75xx_slic_le9642.c
  	return 0;
  }
  
-diff -Naur base/src/en75xx_zsi.c b010/src/en75xx_zsi.c
---- a/src/en75xx_zsi.c
-+++ b/src/en75xx_zsi.c
+--- "base\\src/en75xx_zsi.c"	2026-10-30 23:04:41.628533300 +0800
++++ "b010\\src/en75xx_zsi.c"	2026-10-30 23:08:42.297701100 +0800
 @@ -73,6 +73,10 @@
  /* OEM SPI_Reset (HIR 0xC/0xE) additionally pulses bit 4 around the
   * SLIC0 pulse; purpose undocumented, mirrored for fidelity. */
