@@ -26,9 +26,7 @@ jobs:
           run-id: ${{ inputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: sudo apt-get update && sudo apt-get install -y squashfs-tools u-boot-tools
-
-      - name: 解包/改参数/重打 FIT
+      - name: 解包/改参数/重打 FIT（自包含 Python，不依赖 u-boot 工具）
         run: |
           set -eux
           ls -la
@@ -36,48 +34,117 @@ jobs:
           ITB=$(find images -type f -name '*zn504xg*sysupgrade*.itb' | head -1)
           [ -n "$ITB" ] || { echo 'ERROR: 附件里没找到 zn504xg-d 的 sysupgrade.itb'; exit 1; }
           echo "使用固件: $ITB"
+          head -c 4 "$ITB" | xxd
 
-          magic=$(head -c 4 "$ITB" | xxd -p)
-          echo "文件头 magic: $magic"
-          case "$magic" in
-            d00dfeed)
-              FIT="$ITB"
-              echo '判定: 裸 FIT'
-              ;;
-            55424923)
-              echo '判定: UBI 容器，解卷取内层 fit'
-              sudo apt-get install -y python3-ubireader
-              ubireader_extract_images -o ubi_out "$ITB"
-              FIT=''
-              while IFS= read -r f; do
-                if [ "$(head -c 4 "$f" | xxd -p)" = "d00dfeed" ]; then FIT="$f"; break; fi
-              done < <(find ubi_out -type f)
-              if [ -z "$FIT" ]; then
-                echo 'ERROR: UBI 各卷里没有 FIT 魔数文件，卷清单如下：'
-                find ubi_out -type f -exec ls -la {} \;
-                exit 1
-              fi
-              echo "内层 FIT: $FIT ($(stat -c%s "$FIT") 字节)"
-              ;;
-            *)
-              echo "ERROR: 未知文件头，前 64 字节如下，请贴回来："
-              xxd -l 64 "$ITB"
-              exit 1
-              ;;
-          esac
+          cat > /tmp/fittool.py <<'PYEOF'
+          import struct, sys, zlib, hashlib
 
-          dumpimage -T fit -p 0 -o kernel.bin  "$FIT"
-          dumpimage -T fit -p 1 -o fdt.bin     "$FIT"
-          dumpimage -T fit -p 2 -o rootfs.bin "$FIT"
+          TOK_BEGIN, TOK_END_NODE, TOK_PROP, TOK_END = 1, 2, 3, 9
+
+          def load_fit(path):
+              data = open(path, 'rb').read()
+              magic, totalsize, off_struct, off_strings, off_rsv, version, last_comp = struct.unpack('>7I', data[:28])
+              assert magic == 0xd00dfeed, f'magic={magic:#x}，不是 FIT'
+              assert version >= 17, f'fdt version {version} < 17，不支持'
+              size_strings, size_struct = struct.unpack('>2I', data[32:40])
+              return data, off_struct, data[off_struct:off_struct+size_struct], data[off_strings:off_strings+size_strings]
+
+          def parse_props(sblock, strs, off_struct):
+              props = {}
+              pos = 0
+              stack = []
+              while pos + 4 <= len(sblock):
+                  tok = struct.unpack('>I', sblock[pos:pos+4])[0]
+                  pos += 4
+                  if tok == TOK_BEGIN:
+                      end = sblock.index(b'\0', pos)
+                      name = sblock[pos:end].decode()
+                      pos = (end + 4) & ~3
+                      stack.append(name)
+                  elif tok == TOK_END_NODE:
+                      stack.pop()
+                  elif tok == TOK_PROP:
+                      length, nameoff = struct.unpack('>2I', sblock[pos:pos+8])
+                      voff = pos + 8
+                      name = strs[nameoff:strs.index(b'\0', nameoff)].decode()
+                      props[('/' + '/'.join(s for s in stack if s), name)] = (sblock[voff:voff+length], off_struct + voff)
+                      pos = (voff + length + 3) & ~3
+                  elif tok == 4:
+                      pass
+                  elif tok == TOK_END:
+                      break
+                  else:
+                      raise ValueError(f'未知 FDT token {tok} at {pos}')
+              return props
+
+          def u32(b): return struct.unpack('>I', b)[0]
+
+          def img_range(props, img):
+              p = f'/images/{img}'
+              if (p, 'data') in props:
+                  v = props[(p, 'data')][0]
+                  return u32(v[0:4]), u32(v[4:8])
+              if (p, 'data-position') in props:
+                  return u32(props[(p, 'data-position')][0]), u32(props[(p, 'data-size')][0])
+              return u32(props[(p, 'data-offset')][0]), u32(props[(p, 'data-size')][0])
+
+          mode = sys.argv[1]
+          data, off_struct, sblock, strs = load_fit(sys.argv[2])
+          props = parse_props(sblock, strs, off_struct)
+
+          if mode == 'extract':
+              for name, out in (('kernel-1', 'kernel.bin'), ('fdt-1', 'fdt.bin'), ('rootfs-1', 'rootfs.bin')):
+                  off, size = img_range(props, name)
+                  print(f'{name}: off={off:#x} size={size}')
+                  open(out, 'wb').write(data[off:off+size])
+              sys.exit(0)
+
+          # repack: argv = repack <orig.itb> <new_rootfs> <out.itb>
+          new_rootfs = open(sys.argv[3], 'rb').read()
+          out_path = sys.argv[4]
+          base = bytearray(data)
+          r_off, r_size = img_range(props, 'rootfs-1')
+          p = '/images/rootfs-1'
+
+          if (p, 'data') in props:
+              value, abs_off = props[(p, 'data')]
+              assert len(value) == 8
+              base[abs_off+4:abs_off+8] = struct.pack('>I', len(new_rootfs))
+          else:
+              value, abs_off = props[(p, 'data-size')]
+              assert len(value) == 4
+              base[abs_off:abs_off+4] = struct.pack('>I', len(new_rootfs))
+
+          crc = zlib.crc32(new_rootfs) & 0xffffffff
+          sha = hashlib.sha1(new_rootfs).digest()
+          for sub in ('hash-1', 'hash-2'):
+              v, o = props[(f'{p}/{sub}', 'value')]
+              if len(v) == 4:
+                  base[o:o+4] = struct.pack('>I', crc)
+              elif len(v) == 20:
+                  base[o:o+20] = sha
+              else:
+                  raise ValueError(f'未知 hash 长度 {len(v)}')
+          print(f'patched: rootfs {r_size} -> {len(new_rootfs)} 字节, crc32={crc:#010x}')
+
+          base[r_off:r_off+r_size] = new_rootfs   # rootfs 是末尾数据块，替换后文件自然伸缩
+          open(out_path, 'wb').write(base)
+          print(f'写出 {out_path}: {len(base)} 字节（原 {len(data)}）')
+          PYEOF
+
+          python3 /tmp/fittool.py extract "$ITB"
+          ls -la kernel.bin fdt.bin rootfs.bin
+
           unsquashfs -d rootfs rootfs.bin
-
+          echo '===== 原 squashfs 参数 ====='
+          unsquashfs -s rootfs.bin | grep -E 'Compression|Block size'
           echo '===== modules.d 原始内容（这段回贴给我）====='
           ls rootfs/etc/modules.d/
           grep -H . rootfs/etc/modules.d/*en75xx* || true
 
           target=''
           for f in rootfs/etc/modules.d/*; do
-            if grep -q '^en75xx-zsi' "$f" 2>/dev/null; then target="$f"; break; fi
+            grep -q '^en75xx-zsi' "$f" 2>/dev/null && { target="$f"; break; }
           done
           if [ -n "$target" ]; then
             sed -i 's/^en75xx-zsi.*/en75xx-zsi zsi2_en_auto=0/' "$target"
@@ -87,49 +154,13 @@ jobs:
           echo '===== 改后内容 ====='
           grep -H . rootfs/etc/modules.d/*en75xx* || true
 
-          mksquashfs rootfs rootfs.new.bin -comp xz -b 256k -noappend
-          cat > fit.its <<'EOF'
-          /dts-v1/;
-          / {
-            description = "ARM64 OpenWrt FIT";
-            #address-cells = <1>;
-            images {
-              kernel-1 {
-                description = "ARM64 OpenWrt Linux-6.18.55";
-                data = /incbin/("kernel.bin");
-                type = "kernel"; arch = "arm64"; os = "linux"; compression = "gzip";
-                load = <0x8a000000>; entry = <0x8a000000>;
-                hash-1 { algo = "crc32"; };
-                hash-2 { algo = "sha1"; };
-              };
-              fdt-1 {
-                description = "ARM64 OpenWrt znxt_zn504xg-d device tree blob";
-                data = /incbin/("fdt.bin");
-                type = "flat_dt"; arch = "arm64"; compression = "none";
-                hash-1 { algo = "crc32"; };
-                hash-2 { algo = "sha1"; };
-              };
-              rootfs-1 {
-                description = "ARM64 OpenWrt znxt_zn504xg-d rootfs";
-                data = /incbin/("rootfs.new.bin");
-                type = "filesystem"; arch = "arm64"; compression = "none";
-                hash-1 { algo = "crc32"; };
-                hash-2 { algo = "sha1"; };
-              };
-            };
-            configurations {
-              default = "config-1";
-              config-1 {
-                description = "OpenWrt znxt_zn504xg-d";
-                kernel = "kernel-1";
-                fdt = "fdt-1";
-                loadables = "rootfs-1";
-              };
-            };
-          };
-          EOF
-          mkimage -f fit.its "patched-$(basename "$ITB")"
-          ls -la patched-*
+          comp=$(unsquashfs -s rootfs.bin | awk '/Compression/{print $2}')
+          mksquashfs rootfs rootfs.new.bin -comp "$comp" -b 256k -noappend
+
+          OUT="patched-$(basename "$ITB")"
+          python3 /tmp/fittool.py repack "$ITB" rootfs.new.bin "$OUT"
+          ls -la "$OUT"
+          head -c 4 "$OUT" | xxd
 
       - uses: actions/upload-artifact@v4
         with:
