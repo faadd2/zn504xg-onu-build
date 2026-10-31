@@ -32,23 +32,49 @@ jobs:
         run: |
           set -eux
           ls -la
-          # 附件里是 zip 包（build.yml Pack 步打的），先解
           unzip -o -q ./*-images.zip -d images
-          # 按名字精确选 zn504xg-d 的 sysupgrade，绝不 head -1 碰运气
           ITB=$(find images -type f -name '*zn504xg*sysupgrade*.itb' | head -1)
           [ -n "$ITB" ] || { echo 'ERROR: 附件里没找到 zn504xg-d 的 sysupgrade.itb'; exit 1; }
           echo "使用固件: $ITB"
 
-          dumpimage -T fit -p 0 -o kernel.bin  "$ITB"
-          dumpimage -T fit -p 1 -o fdt.bin     "$ITB"
-          dumpimage -T fit -p 2 -o rootfs.bin "$ITB"
+          magic=$(head -c 4 "$ITB" | xxd -p)
+          echo "文件头 magic: $magic"
+          case "$magic" in
+            d00dfeed)
+              FIT="$ITB"
+              echo '判定: 裸 FIT'
+              ;;
+            55424923)
+              echo '判定: UBI 容器，解卷取内层 fit'
+              sudo apt-get install -y python3-ubireader
+              ubireader_extract_images -o ubi_out "$ITB"
+              FIT=''
+              while IFS= read -r f; do
+                if [ "$(head -c 4 "$f" | xxd -p)" = "d00dfeed" ]; then FIT="$f"; break; fi
+              done < <(find ubi_out -type f)
+              if [ -z "$FIT" ]; then
+                echo 'ERROR: UBI 各卷里没有 FIT 魔数文件，卷清单如下：'
+                find ubi_out -type f -exec ls -la {} \;
+                exit 1
+              fi
+              echo "内层 FIT: $FIT ($(stat -c%s "$FIT") 字节)"
+              ;;
+            *)
+              echo "ERROR: 未知文件头，前 64 字节如下，请贴回来："
+              xxd -l 64 "$ITB"
+              exit 1
+              ;;
+          esac
+
+          dumpimage -T fit -p 0 -o kernel.bin  "$FIT"
+          dumpimage -T fit -p 1 -o fdt.bin     "$FIT"
+          dumpimage -T fit -p 2 -o rootfs.bin "$FIT"
           unsquashfs -d rootfs rootfs.bin
 
           echo '===== modules.d 原始内容（这段回贴给我）====='
           ls rootfs/etc/modules.d/
           grep -H . rootfs/etc/modules.d/*en75xx* || true
 
-          # 改参数：按"内容"找到已有 en75xx-zsi 行就改原行，找不到才新建
           target=''
           for f in rootfs/etc/modules.d/*; do
             if grep -q '^en75xx-zsi' "$f" 2>/dev/null; then target="$f"; break; fi
