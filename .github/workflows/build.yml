@@ -33,6 +33,19 @@ on:
         options:
           - "release"
           - "debug"
+      release_tag:
+        description: Release tag（10-31 用户拍板：废弃「tag 与构建 label 同号」，Release 编号与构建 label 脱钩、由 dispatch 显式指定，正式版自 build-22 起递增；留空=只传 artifact 不发 Release）
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: 以预发布（prerelease）形式发布（不顶替同 tag 的正式 Release 语义，撞号保护仍生效）
+        required: true
+        default: "no"
+        type: choice
+        options:
+          - "no"
+          - "yes"
 
 permissions:
   contents: read
@@ -384,7 +397,8 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    if: always() && needs.build.result == 'success'
+    # release_tag 留空 = 只出 artifact 不发 Release（10-31 起编号脱钩由 dispatch 显式指定）
+    if: always() && needs.build.result == 'success' && inputs.release_tag != ''
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -396,11 +410,26 @@ jobs:
           path: assets
           merge-multiple: true
 
+      # 撞号保护（10-31 用户拍板）：旧时代 action-gh-release 在 tag 已存在时
+      # 静默覆盖资产零告警（build-18 覆盖旧 build-13 资产实证）——先发制人拒绝
+      - name: Guard tag collision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ inputs.release_tag }}" >/dev/null 2>&1; then
+            echo "::error::release tag '${{ inputs.release_tag }}' already exists — refusing to overwrite old assets"
+            exit 1
+          fi
+          echo "release tag '${{ inputs.release_tag }}' is free"
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          # 编号新规（10-22 13:34 拍板）：tag 与构建 label 同号，不再用 run_number 计数器
-          tag_name: ${{ inputs.build_label }}
-          name: "PonWrt an7581 ${{ inputs.build_label }} (${{ github.event.inputs.ponwrt_ref || 'master' }})"
+          # 编号（10-31 用户拍板，废弃 10-22「tag 与 label 同号」）：Release 编号
+          # 独立递增（正式版自 build-22 起），与固件内 build_label 脱钩——
+          # 编译可能失败，同号会让 Release 编号出现空洞
+          tag_name: ${{ inputs.release_tag }}
+          name: "PonWrt an7581 ${{ inputs.release_tag }} (label ${{ inputs.build_label }} · ${{ github.event.inputs.ponwrt_ref || 'master' }})"
+          prerelease: ${{ inputs.prerelease == 'yes' }}
           generate_release_notes: true
           files: assets/*
