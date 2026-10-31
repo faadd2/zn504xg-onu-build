@@ -135,7 +135,7 @@ jobs:
           python3 /tmp/fittool.py extract "$ITB"
           ls -la kernel.bin fdt.bin rootfs.bin
 
-          unsquashfs -d rootfs rootfs.bin
+          sudo unsquashfs -d rootfs rootfs.bin
           echo '===== 原 squashfs 参数 ====='
           unsquashfs -s rootfs.bin | grep -E 'Compression|Block size'
           echo '===== modules.d 原始内容（这段回贴给我）====='
@@ -147,15 +147,16 @@ jobs:
             grep -q '^en75xx-zsi' "$f" 2>/dev/null && { target="$f"; break; }
           done
           if [ -n "$target" ]; then
-            sed -i 's/^en75xx-zsi.*/en75xx-zsi zsi2_en_auto=0/' "$target"
+            sudo sed -i 's/^en75xx-zsi.*/en75xx-zsi zsi2_en_auto=0/' "$target"
           else
-            printf 'en75xx-zsi zsi2_en_auto=0\n' > rootfs/etc/modules.d/51-en75xx-zsi
+            printf 'en75xx-zsi zsi2_en_auto=0\n' | sudo tee rootfs/etc/modules.d/51-en75xx-zsi > /dev/null
           fi
           echo '===== 改后内容 ====='
           grep -H . rootfs/etc/modules.d/*en75xx* || true
 
           comp=$(unsquashfs -s rootfs.bin | awk '/Compression/{print $2}')
-          mksquashfs rootfs rootfs.new.bin -comp "$comp" -b 256k -noappend
+          sudo mksquashfs rootfs rootfs.new.bin -comp "$comp" -b 256k -noappend
+          sudo chown "$USER:$USER" rootfs.new.bin
 
           OUT="patched-$(basename "$ITB")"
           python3 /tmp/fittool.py repack "$ITB" rootfs.new.bin "$OUT"
